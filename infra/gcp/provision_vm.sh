@@ -24,6 +24,15 @@ IMAGE_FAMILY="${IMAGE_FAMILY:-ubuntu-2204-lts}"
 IMAGE_PROJECT="${IMAGE_PROJECT:-ubuntu-os-cloud}"
 IP_NAME="${VM_NAME}-ip"
 FIREWALL_TAG="livekit-sip"
+# Restricts the SIP signaling/RTP firewall rule to these source ranges
+# (comma-separated CIDRs), e.g. Twilio's published SIP signaling IP ranges.
+# Left unset, gcloud defaults to 0.0.0.0/0 (the whole internet) for a rule
+# with no --source-ranges, which combined with infra/livekit/inbound-trunk.json's
+# empty "allowed_addresses" leaves the SIP port open to unauthenticated
+# inbound calls from anyone -- a toll-fraud / cost-abuse risk against the
+# Gemini-backed agent behind it. Set this before running in anything but a
+# throwaway/local test environment.
+SIP_SOURCE_RANGES="${SIP_SOURCE_RANGES:-}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -51,10 +60,19 @@ gcloud compute firewall-rules create "${FIREWALL_TAG}-rtc-udp" \
   --description "LiveKit RTC media (PROP-102)" \
   || echo "  (already exists)"
 
+if [ -z "$SIP_SOURCE_RANGES" ]; then
+  echo "WARNING: SIP_SOURCE_RANGES is not set -- the SIP/RTP firewall rule" >&2
+  echo "  below will allow traffic from 0.0.0.0/0 (any IP on the internet)." >&2
+  echo "  Set SIP_SOURCE_RANGES to Twilio's SIP signaling IP ranges (and set" >&2
+  echo "  infra/livekit/inbound-trunk.json's allowed_addresses too) before" >&2
+  echo "  using this outside a throwaway/local test environment." >&2
+fi
+
 gcloud compute firewall-rules create "${FIREWALL_TAG}-sip" \
   --project "$GCP_PROJECT_ID" \
   --allow udp:5060,udp:10000-20000 \
   --target-tags "$FIREWALL_TAG" \
+  ${SIP_SOURCE_RANGES:+--source-ranges "$SIP_SOURCE_RANGES"} \
   --description "SIP signaling + RTP for the Twilio trunk (PROP-101/102)" \
   || echo "  (already exists)"
 

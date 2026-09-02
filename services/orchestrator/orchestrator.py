@@ -54,6 +54,7 @@ class CallOrchestrator:
         self._gemini = gemini_session
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
+        self._forwarded_track_sids: set[str] = set()
 
     async def start(self) -> None:
         self._publish_source = rtc.AudioSource(sample_rate=GEMINI_OUTPUT_RATE_HZ, num_channels=1)
@@ -62,12 +63,34 @@ class CallOrchestrator:
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         )
 
+        # Register the listener *before* scanning for already-subscribed
+        # tracks: the caller (e.g. a SIP participant) is typically already
+        # in the room -- and may already have a subscribed audio track --
+        # by the time this orchestrator joins and calls start(), since the
+        # room is created by the inbound call itself. If we only listened
+        # for future "track_subscribed" events, that already-subscribed
+        # caller track would never fire one and we'd never forward their
+        # audio to Gemini (one-way call: agent talks, never hears back).
         self._room.on("track_subscribed", self._on_track_subscribed)
+        for participant in self._room.remote_participants.values():
+            for publication in participant.track_publications.values():
+                if publication.kind == rtc.TrackKind.KIND_AUDIO and publication.track is not None:
+                    self._start_forwarding_caller_audio(publication.track, participant)
+
         self._tasks.append(asyncio.create_task(self._forward_gemini_audio_to_room()))
 
     def _on_track_subscribed(self, track: rtc.Track, publication, participant) -> None:
         if track.kind != rtc.TrackKind.KIND_AUDIO:
             return
+        self._start_forwarding_caller_audio(track, participant)
+
+    def _start_forwarding_caller_audio(self, track: rtc.Track, participant) -> None:
+        # Guard against forwarding the same track twice -- it could show up
+        # both in the start-up scan and in a near-simultaneous
+        # "track_subscribed" event for the same track.
+        if track.sid in self._forwarded_track_sids:
+            return
+        self._forwarded_track_sids.add(track.sid)
         logger.info("Subscribed to caller audio track from %s", participant.identity)
         self._tasks.append(asyncio.create_task(self._forward_caller_audio_to_gemini(track)))
 
@@ -76,10 +99,24 @@ class CallOrchestrator:
         try:
             async for event in stream:
                 await self._gemini.send_audio(bytes(event.frame.data))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Caller audio forwarding to Gemini stopped unexpectedly")
+            raise
         finally:
             await stream.aclose()
 
     async def _forward_gemini_audio_to_room(self) -> None:
+        try:
+            await self._run_forward_gemini_audio_to_room()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Gemini audio forwarding to room stopped unexpectedly")
+            raise
+
+    async def _run_forward_gemini_audio_to_room(self) -> None:
         async for event in self._gemini.receive_events():
             if isinstance(event, AudioChunk):
                 frame = rtc.AudioFrame(

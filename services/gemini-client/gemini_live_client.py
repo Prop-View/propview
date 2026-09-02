@@ -98,7 +98,9 @@ class GeminiLiveSession:
         surfacing events for the life of the call.
         """
         while True:
+            got_message = False
             async for message in self._session.receive():
+                got_message = True
                 content = message.server_content
                 if content is None:
                     continue
@@ -113,3 +115,10 @@ class GeminiLiveSession:
 
                 if content.turn_complete:
                     yield TurnComplete()
+
+            if not got_message:
+                # `receive()` returned without yielding anything and without
+                # raising -- treat that as the underlying connection having
+                # closed rather than spin-looping calls to `receive()`
+                # forever with no delay.
+                return

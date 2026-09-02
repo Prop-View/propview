@@ -16,7 +16,6 @@ import sys
 
 from dotenv import load_dotenv
 from twilio.rest import Client
-from twilio.base.exceptions import TwilioRestException
 
 load_dotenv()
 
@@ -83,12 +82,22 @@ def attach_number_to_trunk(client: Client, trunk_sid: str, phone_number_sid: str
 
 def main() -> None:
     client = require_credentials()
+    phone_number_sid = None
     try:
         phone_number_sid = buy_phone_number(client)
         trunk_sid = create_trunk(client)
         attach_number_to_trunk(client, trunk_sid, phone_number_sid)
-    except TwilioRestException as exc:
-        sys.exit(f"Twilio API error: {exc}")
+    except Exception as exc:
+        message = f"Error while provisioning: {exc}"
+        if phone_number_sid:
+            message += (
+                f"\n\nIMPORTANT: phone number (sid={phone_number_sid}) was already "
+                "purchased before this failure and is NOT attached to a trunk. It "
+                "will keep incurring charges until you either fix the issue and "
+                "re-run this script, or release it via the Twilio console / "
+                f"`client.incoming_phone_numbers('{phone_number_sid}').delete()`."
+            )
+        sys.exit(message)
 
     print(
         "\nDone. Record trunk_sid and the purchased number somewhere PROP-102 "

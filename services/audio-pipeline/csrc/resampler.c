@@ -40,6 +40,15 @@ static void init_tables(void) {
     int i, j;
     if (tables_ready) return;
 
+    /* Not thread-safe by itself (plain int flag, no lock/atomic) -- safe in
+     * practice only because __attribute__((constructor)) below runs this to
+     * completion at library-load time, before any thread can reach the
+     * public API functions that call init_tables(). Do not remove that
+     * constructor call without adding real synchronization here: with
+     * multiple threads racing this function directly (e.g. via ctypes from
+     * several Python threads at once, which release the GIL during the
+     * call), the check-then-fill-then-set-flag sequence can interleave and
+     * hand back a torn/partially-initialized table. */
     for (i = 0; i < 256; i++) {
         int16_t v = ulaw_decode_sample((uint8_t)i);
         decode_table[i] = v;
@@ -61,6 +70,16 @@ static void init_tables(void) {
     }
 
     tables_ready = 1;
+}
+
+/* Force table initialization at library-load time (single-threaded, before
+ * any caller can reach ulaw_to_pcm16/pcm16_to_ulaw), so the lazy check in
+ * init_tables() above is always a no-op read in practice and concurrent
+ * calls from multiple threads can never race the fill loop. Supported by
+ * both GCC and Clang on macOS/Linux, the two platforms build.sh targets. */
+__attribute__((constructor))
+static void init_tables_at_load(void) {
+    init_tables();
 }
 
 static uint8_t ulaw_encode_sample(int16_t pcm) {
