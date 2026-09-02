@@ -1,8 +1,17 @@
 # PROP-103 / PROP-107: Audio Resampling Pipeline
 
-Bidirectional bridge between the SIP leg's 8kHz G.711 mu-law audio and
-Gemini Live's PCM (16kHz in, 24kHz out — see `../gemini-client/`). Native
-C for the per-sample hot path, thin ctypes wrapper for everything else.
+Bidirectional 8kHz G.711 mu-law ↔ 16kHz PCM conversion. Native C for the
+per-sample hot path, thin ctypes wrapper for everything else.
+
+**Update from building PROP-105 (orchestrator):** this module is *not*
+actually wired into the LiveKit↔Gemini path. Inspecting the LiveKit SDK
+directly showed `AudioStream`/`AudioSource` do real sample-rate conversion
+inside LiveKit's own media engine, so the orchestrator talks to Gemini's
+16kHz/24kHz PCM directly and never sees raw G.711 — see
+`../orchestrator/README.md` for the full explanation. This code is correct
+and fully tested, and stays available for any future path that touches raw
+G.711 outside LiveKit (e.g. a non-LiveKit fallback stack in Sprint 5), but
+it's not currently on the hot path of a real call.
 
 ## Build & test
 
@@ -52,5 +61,5 @@ sip_frame = ar.gemini_audio_to_sip(pcm16_24k_frame)
 
 - [x] 8kHz mu-law ↔ 16kHz PCM resampling implemented in C, wrapped for Python.
 - [x] Unit tests for 20ms audio frame chunking (PROP-107).
-- [ ] Wired into the orchestrator (PROP-105) once it exists.
-- [ ] Validated against real call audio (synthetic sine waves only so far).
+- [x] ~~Wired into the orchestrator (PROP-105)~~ — turned out not to be needed
+      there; see the note above. Kept as a tested, reusable utility instead.
