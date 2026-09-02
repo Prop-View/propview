@@ -12,6 +12,16 @@ something breaks, check `google.genai.live.AsyncSession.receive` /
 `send_realtime_input` and `google.genai.types.LiveServerContent` first —
 this has moved between versions before.
 
+**Live-tested 2026-09-02** against a real API key: `models.list()` auth
+check, a full text-in/audio-out handshake on `gemini-3.1-flash-live-preview`
+(received real audio bytes back), and `GeminiLiveSession.send_audio()` /
+`send_end_of_audio()` exercised over the network with no errors. Not yet
+tested with real speech + playback — that needs an actual mic/speaker, see
+`test_mic_call.py`. Note: the model name in `google-genai`'s own docstring
+examples (`gemini-live-2.5-flash-preview`) was **not** available to this
+key; `gemini-3.1-flash-live-preview` was — check what's available with
+`client.models.list()` if this key changes or the model gets deprecated.
+
 ## Setup
 
 ```bash

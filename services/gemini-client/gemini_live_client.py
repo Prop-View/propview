@@ -23,7 +23,7 @@ from google.genai import types
 
 INPUT_SAMPLE_RATE_HZ = 16000
 OUTPUT_SAMPLE_RATE_HZ = 24000
-DEFAULT_MODEL = "gemini-live-2.5-flash-preview"
+DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 
 
 @dataclass
