@@ -1,0 +1,25 @@
+version: "3.9"
+
+# PROP-102: LiveKit Media Server + SIP Gateway on a single cloud VM.
+# Two services: the WebRTC media server (livekit-server) and the SIP
+# bridge (livekit-sip) that terminates the Twilio trunk from PROP-101
+# and creates a LiveKit room per inbound call.
+
+services:
+  livekit-server:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  livekit-sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - livekit-server
+    volumes:
+      - ./sip-config.yaml:/etc/sipconfig.yaml:ro
+    command: --config /etc/sipconfig.yaml

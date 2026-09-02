@@ -1,0 +1,17 @@
+# Local dev variant of sip-config.yaml — talks to a livekit-server running
+# natively on the host (`livekit-server --dev`), not the Docker one.
+# Copy to sip-config.local.yaml.
+
+api_key: devkey        # matches `livekit-server --dev` defaults
+api_secret: secret     # matches `livekit-server --dev` defaults
+ws_url: ws://host.docker.internal:7880
+
+sip_port: 5060
+rtp_port: 20000-20050
+
+# No public IP here — LAN-only. A softphone on the same network calls this
+# machine's LAN IP directly (no NAT traversal needed for a same-LAN test).
+use_external_ip: false
+
+logging:
+  level: debug

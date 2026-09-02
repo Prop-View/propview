@@ -1,0 +1,17 @@
+# LiveKit SIP bridge config — terminates the Twilio Elastic SIP Trunk
+# from PROP-101 and creates a LiveKit room per inbound call.
+# Copy to sip-config.yaml, fill in real values, keep it out of git.
+
+api_key: REPLACE_WITH_API_KEY       # must match livekit.yaml
+api_secret: REPLACE_WITH_API_SECRET
+ws_url: ws://localhost:7880          # livekit-server address (same host, network_mode: host)
+
+sip_port: 5060
+rtp_port: 10000-20000
+
+# Set to the VM's public IP. Twilio's Origination URL (PROP-101's
+# LIVEKIT_SIP_ORIGINATION_URI) must point at sip:<this_ip>:5060.
+use_external_ip: true
+
+logging:
+  level: info

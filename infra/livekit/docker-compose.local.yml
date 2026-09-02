@@ -1,0 +1,20 @@
+version: "3.9"
+
+# Local-only variant of PROP-102 for macOS dev/testing (no cloud VM).
+# Docker Desktop on Mac doesn't support `network_mode: host`, so ports are
+# published explicitly instead. livekit-server itself is expected to run
+# natively via Homebrew (`livekit-server --dev`) — only the SIP bridge runs
+# in Docker here, talking back to the host.
+
+services:
+  livekit-sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    ports:
+      - "5060:5060/udp"
+      - "20000-20050:20000-20050/udp"
+    volumes:
+      - ./sip-config.local.yaml:/etc/sipconfig.yaml:ro
+    command: --config /etc/sipconfig.yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

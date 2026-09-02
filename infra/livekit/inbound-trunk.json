@@ -1,0 +1,7 @@
+{
+  "trunk": {
+    "name": "twilio-propview-trunk",
+    "numbers": ["REPLACE_WITH_TWILIO_DID"],
+    "allowed_addresses": []
+  }
+}
