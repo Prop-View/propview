@@ -6,3 +6,7 @@ venv/
 
 infra/livekit/livekit.yaml
 infra/livekit/sip-config.yaml
+
+services/audio-pipeline/*.so
+services/audio-pipeline/*.dylib
+.pytest_cache/
