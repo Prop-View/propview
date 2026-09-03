@@ -33,10 +33,33 @@ that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
 ```bash
 cd services/orchestrator
 pip install -r requirements.txt
-cp .env.example .env   # REDIS_URL, defaults to localhost
-# gemini_live_client must be importable -- either install ../gemini-client
-# as a package, or run with both dirs on PYTHONPATH (see the test for the pattern)
+cp .env.example .env   # fill in GEMINI_API_KEY; LiveKit/Redis defaults match local dev
 ```
+
+`main.py` adds `../gemini-client/` to `sys.path` itself at startup, so
+`gemini_live_client` doesn't need to be separately installed or put on
+`PYTHONPATH` by hand.
+
+## Running a call
+
+```bash
+python main.py <room-name>
+```
+
+Connects to `<room-name>` as the agent, bridges it to Gemini, and runs
+until the caller disconnects (or Ctrl+C). This is the actual process a
+deployed VM would run — not yet wired to auto-dispatch on every new
+inbound SIP call (that needs LiveKit's Agent Worker / job-dispatch system,
+a separate step once PROP-102 is deployed and real calls exist to
+dispatch against); for now it's invoked with an explicit room name.
+
+**Verified live end-to-end** 2026-09-03 with real LiveKit, real Redis, and
+a real Gemini API key (no telephony — a synthetic caller participant
+stood in for the phone leg): the process joined the room, created its
+Redis session, subscribed to the caller's audio track, and — when the
+caller disconnected — cleanly cancelled its forwarding tasks, closed the
+Gemini session, deleted the Redis session, disconnected from the room, and
+exited.
 
 For local Redis: `brew install redis && brew services start redis` (or
 `redis-server` directly). See `../../infra/redis/README.md` for cloud
@@ -80,10 +103,10 @@ Gemini side — the two aren't yet exercised in the same run.
 - [x] Verified live against a real LiveKit server (fake Gemini session).
 - [x] Redis session store: create/get/end/touch, verified against real
       Redis including actual TTL expiry timing (PROP-106).
-- [ ] Orchestrator wired to actually call `SessionStore.create_session()`
-      when a call starts (not yet connected — session_store.py exists as
-      a tested, standalone module; the orchestrator doesn't call it yet).
+- [x] `main.py` composes GeminiLiveSession + SessionStore + CallOrchestrator
+      into one runnable process, verified live end-to-end (see above).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
+- [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).
 - [ ] Barge-in buffer clearing wired to real VAD signal (PROP-203/204, Sprint 2) —
       `Interrupted` events already call `clear_queue()`, but that event only
       fires from Gemini's own server-side interruption detection for now.
