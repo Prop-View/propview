@@ -20,10 +20,11 @@ import os
 import sys
 from pathlib import Path
 
-# gemini_live_client lives in the sibling services/gemini-client/ directory,
-# not installed as a package -- add it to sys.path so this script (and the
-# orchestrator module it imports) can find it without manual PYTHONPATH setup.
+# gemini_live_client and system_prompt live in sibling service directories,
+# not installed as packages -- add them to sys.path so this script (and the
+# orchestrator module it imports) can find them without manual PYTHONPATH setup.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gemini-client"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "prompts"))
 
 from dotenv import load_dotenv
 from livekit import api, rtc
@@ -31,6 +32,7 @@ from livekit import api, rtc
 from gemini_live_client import GeminiLiveSession
 from orchestrator import CallOrchestrator
 from session_store import SessionStore
+from system_prompt import build_system_prompt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -40,7 +42,7 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 AGENT_IDENTITY = "ai-agent"
-AGENT_PERSONA = "You are a friendly, concise real estate voice assistant. Keep replies short and natural."
+AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 
 
 def make_token(room_name: str) -> str:
@@ -73,7 +75,7 @@ async def run_call(room_name: str) -> None:
 
     session_store = SessionStore(redis_url=REDIS_URL)
 
-    async with GeminiLiveSession(system_instruction=AGENT_PERSONA) as gemini_session:
+    async with GeminiLiveSession(system_instruction=build_system_prompt(AGENCY_NAME)) as gemini_session:
         orchestrator = CallOrchestrator(room=room, gemini_session=gemini_session, session_store=session_store)
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")
