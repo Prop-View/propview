@@ -7,9 +7,14 @@ these live in `../tool-router/tools/check_calendar_slots.py` and
 `book_site_visit.py` — this directory holds the underlying clients, not
 the tool schemas themselves (same split as `../lead-engine/`).
 
-PROP-503 (SIP call transfer) and PROP-504 (pre-transfer webhook) are
-listed in this directory's original scope but not built yet — see
-Sprint 5 notes once those exist.
+PROP-503 (SIP call transfer) and PROP-504 (pre-transfer webhook) were
+listed in this directory's original scope but ended up living in
+`../orchestrator/` instead (`human_transfer.py`, `pre_transfer_summary.py`)
+— executing a transfer needs direct LiveKit room/SIP admin access, which
+only the orchestrator has; see `../orchestrator/README.md`'s "Human
+transfer" section. This directory's `sms_dispatch.py` is still what sends
+the pre-transfer SMS itself, just called from there instead of a tool
+router tool.
 
 ## Credentials
 

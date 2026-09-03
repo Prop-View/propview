@@ -26,9 +26,12 @@ import time
 from pathlib import Path
 from typing import Protocol
 
-from livekit import rtc
+from google.genai import types as genai_types
+from livekit import api, rtc
 
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
+from human_transfer import transfer_to_broker
+from pre_transfer_summary import build_pre_transfer_summary
 from session_store import SessionStore
 from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
@@ -38,12 +41,40 @@ from vocal_filler import VocalFillerPlayer
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
 
+sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))  # append, not insert(0) -- see tool-router/tools/_calendar_context.py
+from sms_dispatch import SmsDispatchError, send_sms  # noqa: E402
+
 logger = logging.getLogger("orchestrator")
 
 GEMINI_INPUT_RATE_HZ = 16000
 GEMINI_OUTPUT_RATE_HZ = 24000
 AGENT_TRACK_NAME = "agent-voice"
+
+# PROP-503: a local tool -- not fetched from the Tool Router's /tools/schema
+# like the others, since executing it needs direct LiveKit room/SIP admin
+# access the Tool Router doesn't have. Dispatched locally in
+# _handle_tool_call rather than forwarded over HTTP.
+TRANSFER_TO_HUMAN_TOOL = genai_types.FunctionDeclaration(
+    name="transfer_to_human_agent",
+    description=(
+        "Transfers the call to a human broker immediately. Call this the moment the caller "
+        "explicitly asks for a person, a manager, or a human -- don't ask clarifying questions first."
+    ),
+    parameters_json_schema={
+        "type": "object",
+        "properties": {
+            "reason": {"type": "string", "description": "Brief reason, e.g. 'caller asked for a human'"}
+        },
+    },
+)
 DEFAULT_FILLER_DELAY_SECONDS = 0.5  # plan's threshold for "tool calls expected to exceed 500ms"
+
+
+def build_gemini_tools(remote_tools: list[genai_types.Tool]) -> list[genai_types.Tool]:
+    """Merges the Tool Router's remote tool schemas with locally-dispatched
+    ones (just transfer_to_human_agent today) into the single list
+    GeminiLiveSession(tools=...) expects."""
+    return [*remote_tools, genai_types.Tool(function_declarations=[TRANSFER_TO_HUMAN_TOOL])]
 
 
 class AudioChunkLike(Protocol):
@@ -72,6 +103,8 @@ class CallOrchestrator:
         tenant_id: str = "default",
         vad_detector: SpeechActivityDetector | None = None,
         filler_delay_seconds: float = DEFAULT_FILLER_DELAY_SECONDS,
+        lk_api: api.LiveKitAPI | None = None,
+        broker_phone_number: str | None = None,
     ):
         self._room = room
         self._gemini = gemini_session
@@ -80,6 +113,13 @@ class CallOrchestrator:
         self._database_url = database_url
         self._tenant_id = tenant_id
         self._filler_delay_seconds = filler_delay_seconds
+        # PROP-503/504: both None disables transfer entirely -- transfer_to_human_agent
+        # replies with an error to Gemini rather than raising, so a call
+        # without transfer configured still degrades gracefully.
+        self._lk_api = lk_api
+        self._broker_phone_number = broker_phone_number
+        self._caller_identity: str | None = None
+        self._last_lead_snapshot: dict | None = None
         # None disables predictive barge-in entirely (e.g. lightweight unit
         # tests) -- Gemini's own reactive Interrupted signal still works
         # either way, this only adds the faster local path on top of it.
@@ -152,6 +192,7 @@ class CallOrchestrator:
         self._forwarded_track_sids.add(track.sid)
         logger.info("Subscribed to caller audio track from %s", participant.identity)
         self._telemetry.record_track_subscribed(participant.identity)
+        self._caller_identity = participant.identity  # needed for PROP-503's transfer_sip_participant call
         self._capture_caller_phone_number(participant)
         self._tasks.append(asyncio.create_task(self._forward_caller_audio_to_gemini(track)))
 
@@ -265,6 +306,13 @@ class CallOrchestrator:
             self._transcript_buffer[chunk.speaker] = ""
 
     async def _handle_tool_call(self, call: ToolCallRequest) -> None:
+        if call.name == "transfer_to_human_agent":
+            # Dispatched locally, not through self._tool_client -- see
+            # TRANSFER_TO_HUMAN_TOOL's comment, the Tool Router has no
+            # LiveKit room/SIP admin access to act on this itself.
+            await self._handle_transfer_to_human(call)
+            return
+
         if self._tool_client is None:
             logger.warning("Tool call %r received but no tool_client configured -- ignoring", call.name)
             return
@@ -290,6 +338,7 @@ class CallOrchestrator:
             error = None
             if call.name == "update_lead_qualification" and "lead_id" in result:
                 self._lead_id = result["lead_id"]  # subsequent calls this turn update the same row
+                self._last_lead_snapshot = result.get("captured")  # PROP-504's pre-transfer summary uses this
         except Exception as exc:  # noqa: BLE001 -- always report back to Gemini, even on failure
             logger.exception("Tool call %s failed", call.name)
             result = None
@@ -313,6 +362,52 @@ class CallOrchestrator:
         )
 
         response = {"error": error} if error else {"result": result}
+        await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
+
+    async def _handle_transfer_to_human(self, call: ToolCallRequest) -> None:
+        """PROP-503/504: dispatches the pre-transfer SMS to the broker
+        (best-effort -- a failed SMS doesn't block the transfer itself,
+        same reasoning as book_site_visit's confirmation SMS), then hands
+        the caller's SIP leg off to the broker's phone via LiveKit's
+        TransferSIPParticipant API. Degrades to a spoken-by-Gemini "not
+        available" response rather than raising if transfer isn't
+        configured for this call (lk_api/broker_phone_number/caller_identity
+        all need to be set -- see __init__)."""
+        reason = call.args.get("reason", "")
+        logger.info("Transfer to human agent requested: %r", reason)
+
+        if self._lk_api is None or self._broker_phone_number is None or self._caller_identity is None:
+            logger.warning("Transfer requested but not configured for this call -- lk_api/broker_phone_number/caller_identity missing")
+            await self._gemini.send_tool_response(
+                call_id=call.id,
+                name=call.name,
+                response={"error": "Human transfer is not available for this call"},
+            )
+            return
+
+        try:
+            await send_sms(
+                self._broker_phone_number,
+                build_pre_transfer_summary(
+                    self._caller_phone_number, reason, self._last_lead_snapshot, self._transcript_lines
+                ),
+            )
+        except SmsDispatchError:
+            logger.exception("Pre-transfer SMS to broker failed -- proceeding with transfer anyway")
+
+        try:
+            await transfer_to_broker(self._lk_api, self._room.name, self._caller_identity, self._broker_phone_number)
+            response = {"status": "transferred"}
+        except Exception as exc:  # noqa: BLE001 -- always report back to Gemini, even on failure
+            logger.exception("SIP transfer to human broker failed")
+            response = {"error": str(exc)}
+
+        log_event(
+            "call_transferred_to_human",
+            self._room.name,
+            payload={"reason": reason, "error": response.get("error")},
+            level="ERROR" if "error" in response else "INFO",
+        )
         await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
 
     async def aclose(self) -> None:

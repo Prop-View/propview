@@ -1,4 +1,4 @@
-# PROP-105 / PROP-106 / PROP-206 / PROP-305: Orchestrator, Session Store, Telemetry & Vocal Filler
+# PROP-105 / PROP-106 / PROP-206 / PROP-305 / PROP-503 / PROP-504: Orchestrator, Session Store, Telemetry, Vocal Filler & Human Transfer
 
 Bridges a LiveKit room's caller audio to a Gemini Live session
 (`../gemini-client/`): subscribes to the caller's track, forwards audio
@@ -119,6 +119,42 @@ filler audio frames on the caller's subscribed track (150 received,
 result resolved. `tests/test_vocal_filler.py` covers the
 play/no-play/cancel logic in isolation with fakes (3/3 passing).
 
+## Human transfer (PROP-503/504)
+
+`transfer_to_human_agent` is a **local** tool — unlike every other tool
+Gemini can call, it isn't fetched from the Tool Router's `/tools/schema`
+(`build_gemini_tools()` in `orchestrator.py` merges it in directly),
+because executing it needs direct LiveKit room/SIP admin access the Tool
+Router doesn't have. `_handle_tool_call` special-cases it to dispatch
+locally instead of forwarding to `self._tool_client`.
+
+On call: (1) PROP-504's pre-transfer SMS goes to `BROKER_PHONE_NUMBER`
+first, built by `pre_transfer_summary.py` from whatever's already in
+memory — the caller's phone number, the transfer reason Gemini gave, the
+most recent `update_lead_qualification` result (`_last_lead_snapshot`),
+and the last few caller transcript lines — no extra DB round trip needed.
+SMS failure doesn't block the transfer itself (best-effort, same
+treatment as `book_site_visit`'s confirmation text). (2) The caller's SIP
+leg is hard-transferred to the broker's phone via LiveKit's
+`TransferSIPParticipant` API (`human_transfer.py`) — a blind/cold
+transfer: the caller leaves this LiveKit room entirely, the AI's
+involvement ends. This is the actual "SIP REFER" mechanism available in
+an architecture that never terminates SIP itself (Twilio hands off to
+LiveKit's SIP gateway, see `../../infra/livekit/`).
+
+Both `lk_api` and `BROKER_PHONE_NUMBER` are optional — unset, transfer
+replies to Gemini with a "not available" error rather than failing the
+call, so a deployment without a configured broker number still works for
+everything else.
+
+**Not live-verified**: no real LiveKit SIP deployment with an actual
+inbound caller to transfer exists yet (PROP-101/102 aren't deployed) —
+same gap as everything else gated on real telephony infra.
+`tests/test_human_transfer.py` mocks both the SIP transfer and the SMS
+dispatch to verify the dispatch/degrade-gracefully logic (5/5 passing);
+`tests/test_pre_transfer_summary.py` covers the summary text itself with
+no mocks needed (6/6 passing).
+
 ## Setup
 
 ```bash
@@ -236,6 +272,9 @@ result.
       `source="vap_predictive"`.
 - [x] Interactive Vocal Filler masking tool-call latency >500ms
       (PROP-305) — see dedicated section above. Live-verified 2026-09-04.
+- [x] SIP call transfer to a human broker (PROP-503) with a pre-transfer
+      context SMS (PROP-504) — see dedicated section above. Not yet
+      live-verified against real telephony (no SIP deployment exists).
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).

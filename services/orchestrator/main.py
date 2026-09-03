@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 from livekit import api, rtc
 
 from gemini_live_client import GeminiLiveSession
-from orchestrator import CallOrchestrator
+from orchestrator import CallOrchestrator, build_gemini_tools
 from session_store import SessionStore
 from system_prompt import build_system_prompt
 from tool_client import ToolRouterClient
@@ -50,6 +50,9 @@ AGENT_IDENTITY = "ai-agent"
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 TENANT_ID = os.environ.get("TENANT_ID", "default")
 ENABLE_PREDICTIVE_BARGE_IN = os.environ.get("ENABLE_PREDICTIVE_BARGE_IN", "true").lower() != "false"
+# PROP-503/504 -- unset skips transfer setup entirely (transfer_to_human_agent
+# then replies with a "not available" error rather than failing the call).
+BROKER_PHONE_NUMBER = os.environ.get("BROKER_PHONE_NUMBER")
 
 
 def make_token(room_name: str) -> str:
@@ -82,7 +85,10 @@ async def run_call(room_name: str) -> None:
 
     session_store = SessionStore(redis_url=REDIS_URL)
     tool_client = ToolRouterClient(base_url=TOOL_ROUTER_URL, tenant_id=TENANT_ID)
-    gemini_tools = await tool_client.fetch_gemini_tools()
+    remote_tools = await tool_client.fetch_gemini_tools()
+    gemini_tools = build_gemini_tools(remote_tools)
+
+    lk_api = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) if BROKER_PHONE_NUMBER else None
 
     async with GeminiLiveSession(
         system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
@@ -98,6 +104,8 @@ async def run_call(room_name: str) -> None:
             database_url=DATABASE_URL,
             tenant_id=TENANT_ID,
             vad_detector=vad_detector,
+            lk_api=lk_api,
+            broker_phone_number=BROKER_PHONE_NUMBER,
         )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")
@@ -107,6 +115,8 @@ async def run_call(room_name: str) -> None:
         finally:
             await orchestrator.aclose()
             await session_store.aclose()
+            if lk_api is not None:
+                await lk_api.aclose()
             if room.isconnected():
                 await room.disconnect()
             logger.info("Call ended, cleaned up.")
