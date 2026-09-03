@@ -34,7 +34,7 @@ class SearchPropertiesArgs(BaseModel):
     limit: int = Field(10, ge=1, le=50)
 
 
-async def search_properties(pool: asyncpg.Pool, args: SearchPropertiesArgs, tenant_id: str = "default") -> list[dict]:
+async def search_properties(connection: asyncpg.Connection, args: SearchPropertiesArgs, tenant_id: str = "default") -> list[dict]:
     conditions = ["tenant_id = $1", "status = $2"]
     params: list = [tenant_id, args.status]
 
@@ -66,5 +66,5 @@ async def search_properties(pool: asyncpg.Pool, args: SearchPropertiesArgs, tena
         LIMIT ${len(params)}
     """
 
-    rows = await pool.fetch(query, *params)
+    rows = await connection.fetch(query, *params)
     return [record_to_dict(row) for row in rows]

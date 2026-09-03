@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ValidationError
 
-from db import close_pool, get_pool
+from db import close_pool, get_pool, tenant_connection
 from tools.get_property_details import GetPropertyDetailsArgs, get_property_details
 from tools.search_properties import SearchPropertiesArgs, search_properties
 
@@ -49,8 +49,8 @@ async def call_tool(request: ToolCallRequest):
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
-    pool = await get_pool()
-    result = await handler(pool, args, tenant_id=request.tenant_id)
+    async with tenant_connection(request.tenant_id) as connection:
+        result = await handler(connection, args, tenant_id=request.tenant_id)
     return {"name": request.name, "result": result}
 
 

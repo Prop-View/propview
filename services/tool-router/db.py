@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 import asyncpg
 
@@ -22,6 +23,23 @@ async def close_pool() -> None:
     if _pool is not None:
         await _pool.close()
         _pool = None
+
+
+@asynccontextmanager
+async def tenant_connection(tenant_id: str):
+    """Acquires a connection with PROP-601's RLS tenant context set for the
+    life of one transaction. Required since RLS here is fail-closed: a
+    connection that never sets app.tenant_id sees zero rows, not all rows.
+
+    NOTE: this only actually enforces isolation if DATABASE_URL connects as
+    a non-superuser role -- Postgres always bypasses RLS for superusers,
+    FORCE ROW LEVEL SECURITY notwithstanding. See db/migrations/README.md.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute("SELECT set_config('app.tenant_id', $1, true)", tenant_id)
+            yield connection
 
 
 def record_to_dict(row: asyncpg.Record) -> dict:

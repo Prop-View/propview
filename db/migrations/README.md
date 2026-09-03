@@ -18,6 +18,11 @@ pip install -r requirements.txt
 DATABASE_URL=postgresql://localhost/propview_dev python apply_migrations.py
 ```
 
+Run `apply_migrations.py` as the cluster superuser (default local setup) —
+`000_create_app_role.sql` needs superuser privileges to create the
+`propview_app` role. **Application code must connect as `propview_app`,
+not the superuser** — see the RLS section below for why.
+
 **Verified** 2026-09-03 against a real local instance: schema applies
 cleanly, `CREATE EXTENSION vector` succeeds (v0.8.6), a `search_properties`-
 style filtered query returns correct results, and a real cosine-distance
@@ -43,9 +48,23 @@ closest embedding.
   ties a durable record back to `services/orchestrator/session_store.py`'s
   ephemeral Redis session.
 
-`tenant_id` (default `'default'`) is on every table now, with no RLS
-policies yet — PROP-601 (Sprint 6) only needs to add policies on top of
-this rather than restructure the schema later.
+- **Row-Level Security** (PROP-601, `004_row_level_security.sql`) enforces
+  `tenant_id` isolation on every table above, fail-closed (a connection
+  that never sets `app.tenant_id` sees zero rows, not all rows).
+
+  **Critical, only found by testing this for real**: Postgres always
+  bypasses RLS for superuser roles, `FORCE ROW LEVEL SECURITY`
+  notwithstanding. The initial local dev role is a superuser by default —
+  RLS silently did nothing under it (all tenants saw all rows) until
+  switching to `propview_app` (`000_create_app_role.sql`, `NOSUPERUSER
+  NOBYPASSRLS`), after which isolation was verified correct. **Any code
+  connecting to this database that needs RLS enforced must use
+  `propview_app`, never a superuser.**
+
+  Application code must call
+  `SELECT set_config('app.tenant_id', $1, true)` (transaction-local)
+  before querying — see `services/tool-router/db.py`'s
+  `tenant_connection()` for the pattern.
 
 ## Definition of Done (from Sprint Plan)
 
@@ -54,3 +73,8 @@ this rather than restructure the schema later.
 - [x] PROP-401 CRM schema: contacts/leads/appointments/interactions, verified
       against real Postgres (insert flow, CHECK constraint rejection,
       cascade deletes, unique-phone-per-tenant), 4/4 pytest passing.
+- [x] PROP-601 Row-Level Security: verified against real Postgres using the
+      correct non-superuser role — fail-closed with no tenant set, and
+      genuine cross-tenant isolation confirmed (see the critical finding
+      above). Tool Router updated to set tenant context per request;
+      its full test suite (12 cases) still passes with RLS enforced.

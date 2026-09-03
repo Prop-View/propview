@@ -23,7 +23,12 @@ TEST_TENANT = "test-tool-router"
 
 
 async def _seed() -> None:
+    # PROP-601's RLS is fail-closed (WITH CHECK included), so this
+    # connection must set app.tenant_id before insert/delete or every
+    # statement is rejected -- caught by actually running these tests
+    # after enabling RLS, not assumed.
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute(
         """
@@ -41,6 +46,7 @@ async def _seed() -> None:
 
 async def _cleanup() -> None:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
     await conn.close()
 
@@ -119,6 +125,16 @@ def test_get_property_details_respects_tenant_isolation(client):
 
     resp = call_tool(client, "get_property_details", {"property_id": prop_id}, tenant_id="some-other-tenant")
     assert resp.json()["result"] is None
+
+
+def test_search_properties_isolated_by_rls_not_just_app_filter(client):
+    """PROP-601: even asking for this tenant's exact city/type, a
+    different tenant_id must see nothing -- enforced by Postgres RLS
+    (db/migrations/004_row_level_security.sql), not just this query's own
+    WHERE tenant_id clause."""
+    resp = call_tool(client, "search_properties", {"city": "Austin"}, tenant_id="some-other-tenant")
+    assert resp.status_code == 200
+    assert resp.json()["result"] == []
 
 
 def test_unknown_tool_returns_404(client):

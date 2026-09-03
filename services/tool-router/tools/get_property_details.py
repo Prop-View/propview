@@ -15,8 +15,8 @@ class GetPropertyDetailsArgs(BaseModel):
     property_id: int
 
 
-async def get_property_details(pool: asyncpg.Pool, args: GetPropertyDetailsArgs, tenant_id: str = "default") -> dict | None:
-    row = await pool.fetchrow(
+async def get_property_details(connection: asyncpg.Connection, args: GetPropertyDetailsArgs, tenant_id: str = "default") -> dict | None:
+    row = await connection.fetchrow(
         """
         SELECT id, address, city, state, property_type, status, beds, baths, sqft,
                price, hoa_fee, amenities, floor_plan_url, listing_agent

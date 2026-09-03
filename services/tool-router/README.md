@@ -8,11 +8,22 @@ matching Gemini's tool-calling protocol) to real database-backed handlers.
 ```bash
 cd services/tool-router
 pip install -r requirements.txt
-cp .env.example .env   # DATABASE_URL, defaults to local dev
+cp .env.example .env   # DATABASE_URL -- must be the propview_app role, NOT the superuser (see below)
 uvicorn main:app --reload
 ```
 
 Requires `db/migrations/` applied first (see its README).
+
+## Row-Level Security (PROP-601)
+
+Every query runs inside `db.tenant_connection()`, which sets
+`app.tenant_id` for the transaction before the handler touches the
+database — required because `db/migrations/004_row_level_security.sql`'s
+RLS policies are fail-closed. **`DATABASE_URL` must point at the
+`propview_app` role** (`db/migrations/000_create_app_role.sql`), not a
+superuser — Postgres always bypasses RLS for superusers, so connecting as
+one would make this isolation silently do nothing (found by testing it,
+not assumed — see `db/migrations/README.md`).
 
 ## API
 
@@ -49,11 +60,13 @@ It's treated as a literal (non-matching) string; the table survives.
 ## Testing
 
 ```bash
-DATABASE_URL=postgresql://localhost/propview_dev python -m pytest tests/ -v
+DATABASE_URL=postgresql://propview_app:devpassword@localhost/propview_dev python -m pytest tests/ -v
 ```
 
-**Verified passing** 2026-09-03: all 11 cases against a real local
-Postgres — correct filtering, tenant isolation, JSONB/Decimal correctly
+**Verified passing** 2026-09-03: all 12 cases against a real local
+Postgres, connected as `propview_app` (not the superuser, so RLS is
+genuinely enforced, not silently bypassed) — correct filtering, tenant
+isolation at both the app-query and RLS layers, JSONB/Decimal correctly
 normalized to JSON-safe types (`amenities` as a list, `price` as a
 number), invalid enum rejected with 422, and the SQL injection attempt.
 
@@ -62,6 +75,8 @@ number), invalid enum rejected with 422, and the SQL injection attempt.
 - [x] FastAPI Tool Router service handling function-call payloads (PROP-303).
 - [x] `search_properties` tool schema & SQL execution logic (PROP-304).
 - [x] SQL injection prevention & schema parameter validation (PROP-307).
+- [x] Tenant isolation enforced by Postgres RLS, not just app-level
+      filtering, verified with a real cross-tenant test (PROP-601).
 - [ ] Registered as an actual Gemini tool in the orchestrator (Sprint 3/4
       wiring — the schema endpoint exists for this, not yet consumed).
 - [ ] PROP-306 (latency + **context injection** integration testing) is
