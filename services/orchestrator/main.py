@@ -33,6 +33,7 @@ from gemini_live_client import GeminiLiveSession
 from orchestrator import CallOrchestrator
 from session_store import SessionStore
 from system_prompt import build_system_prompt
+from tool_client import ToolRouterClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -41,8 +42,10 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8000")
 AGENT_IDENTITY = "ai-agent"
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
+TENANT_ID = os.environ.get("TENANT_ID", "default")
 
 
 def make_token(room_name: str) -> str:
@@ -74,9 +77,15 @@ async def run_call(room_name: str) -> None:
     logger.info("Agent joined room %r", room_name)
 
     session_store = SessionStore(redis_url=REDIS_URL)
+    tool_client = ToolRouterClient(base_url=TOOL_ROUTER_URL, tenant_id=TENANT_ID)
+    gemini_tools = await tool_client.fetch_gemini_tools()
 
-    async with GeminiLiveSession(system_instruction=build_system_prompt(AGENCY_NAME)) as gemini_session:
-        orchestrator = CallOrchestrator(room=room, gemini_session=gemini_session, session_store=session_store)
+    async with GeminiLiveSession(
+        system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
+    ) as gemini_session:
+        orchestrator = CallOrchestrator(
+            room=room, gemini_session=gemini_session, session_store=session_store, tool_client=tool_client
+        )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")
 

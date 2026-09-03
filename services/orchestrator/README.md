@@ -138,6 +138,13 @@ Gemini side — the two aren't yet exercised in the same run.
       into one runnable process, verified live end-to-end (see above).
 - [x] OpenTelemetry spans + structured JSON logs tracking call_id and
       per-turn response latency, verified live (PROP-206).
+- [x] `tool_client.py` registers `../tool-router/`'s tools with Gemini and
+      dispatches `ToolCallRequest` events to it, logging a
+      `tool_execution_completed` structured event (plan section 5's exact
+      schema) per call. **Live-verified** 2026-09-03: real text query →
+      real `search_properties` call → real Postgres data → real spoken
+      response, wired through `main.py`. Closes the "not yet registered
+      as a Gemini tool" gap noted in the Tool Router's own README.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).

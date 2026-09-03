@@ -43,7 +43,16 @@ class Interrupted:
     """The model's turn was cut off (barge-in) — see PROP-204."""
 
 
-LiveEvent = AudioChunk | TurnComplete | Interrupted
+@dataclass
+class ToolCallRequest:
+    """The model wants to call a function. Reply with GeminiLiveSession.send_tool_response()."""
+
+    id: str
+    name: str
+    args: dict
+
+
+LiveEvent = AudioChunk | TurnComplete | Interrupted | ToolCallRequest
 
 
 class GeminiLiveSession:
@@ -61,12 +70,14 @@ class GeminiLiveSession:
         api_key: str | None = None,
         model: str | None = None,
         system_instruction: str | None = None,
+        tools: list[types.Tool] | None = None,
     ):
         self._client = genai.Client(api_key=api_key or os.environ["GEMINI_API_KEY"])
         self._model = model or os.environ.get("GEMINI_LIVE_MODEL", DEFAULT_MODEL)
         self._config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=system_instruction,
+            tools=tools,
         )
         self._connect_cm = None
         self._session = None
@@ -90,6 +101,18 @@ class GeminiLiveSession:
         """Signal the caller stopped speaking (e.g. call ended)."""
         await self._session.send_realtime_input(audio_stream_end=True)
 
+    async def send_tool_response(self, call_id: str, name: str, response: dict) -> None:
+        """Reply to a ToolCallRequest event with the tool's result."""
+        await self._session.send_tool_response(
+            function_responses=types.FunctionResponse(id=call_id, name=name, response=response)
+        )
+
+    async def send_text(self, text: str, end_of_turn: bool = True) -> None:
+        """Send text as a user turn. Mainly for testing without a mic/real call."""
+        await self._session.send_client_content(
+            turns=types.Content(role="user", parts=[types.Part(text=text)]), turn_complete=end_of_turn
+        )
+
     async def receive_events(self) -> AsyncIterator[LiveEvent]:
         """Yields events for the whole session (all turns, not just one).
 
@@ -101,6 +124,11 @@ class GeminiLiveSession:
             got_message = False
             async for message in self._session.receive():
                 got_message = True
+
+                if message.tool_call:
+                    for call in message.tool_call.function_calls:
+                        yield ToolCallRequest(id=call.id, name=call.name, args=call.args or {})
+
                 content = message.server_content
                 if content is None:
                     continue

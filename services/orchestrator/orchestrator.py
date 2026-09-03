@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Protocol
 
 from livekit import rtc
 
-from gemini_live_client import AudioChunk, Interrupted, TurnComplete
+from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TurnComplete
 from session_store import SessionStore
-from telemetry import CallTelemetry
+from telemetry import CallTelemetry, log_event
+from tool_client import ToolRouterClient
 
 logger = logging.getLogger("orchestrator")
 
@@ -45,7 +47,8 @@ class GeminiSessionLike(Protocol):
 
     async def send_audio(self, pcm16_bytes: bytes) -> None: ...
     async def send_end_of_audio(self) -> None: ...
-    def receive_events(self): ...  # AsyncIterator[AudioChunk | TurnComplete | Interrupted]
+    async def send_tool_response(self, call_id: str, name: str, response: dict) -> None: ...
+    def receive_events(self): ...  # AsyncIterator[AudioChunk | TurnComplete | Interrupted | ToolCallRequest]
 
 
 class CallOrchestrator:
@@ -56,10 +59,12 @@ class CallOrchestrator:
         room: rtc.Room,
         gemini_session: GeminiSessionLike,
         session_store: SessionStore | None = None,
+        tool_client: ToolRouterClient | None = None,
     ):
         self._room = room
         self._gemini = gemini_session
         self._session_store = session_store
+        self._tool_client = tool_client
         self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name)
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
@@ -150,6 +155,35 @@ class CallOrchestrator:
                 logger.info("Gemini turn interrupted (barge-in) -- clearing playout queue")
                 self._telemetry.record_interrupted()
                 self._publish_source.clear_queue()
+            elif isinstance(event, ToolCallRequest):
+                await self._handle_tool_call(event)
+
+    async def _handle_tool_call(self, call: ToolCallRequest) -> None:
+        if self._tool_client is None:
+            logger.warning("Tool call %r received but no tool_client configured -- ignoring", call.name)
+            return
+
+        logger.info("Tool call: %s(%r)", call.name, call.args)
+        started_at = time.monotonic()
+        try:
+            result = await self._tool_client.call_tool(call.name, call.args)
+            error = None
+        except Exception as exc:  # noqa: BLE001 -- always report back to Gemini, even on failure
+            logger.exception("Tool call %s failed", call.name)
+            result = None
+            error = str(exc)
+
+        execution_time_ms = (time.monotonic() - started_at) * 1000
+        log_event(
+            "tool_execution_completed",
+            self._room.name,
+            metrics={"execution_time_ms": round(execution_time_ms, 1)},
+            payload={"tool_name": call.name, "args": call.args, "error": error},
+            level="ERROR" if error else "INFO",
+        )
+
+        response = {"error": error} if error else {"result": result}
+        await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
 
     async def aclose(self) -> None:
         for task in self._tasks:
@@ -157,4 +191,6 @@ class CallOrchestrator:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         if self._session_store is not None:
             await self._session_store.end_session(call_id=self._room.name)
+        if self._tool_client is not None:
+            await self._tool_client.aclose()
         self._telemetry.end()

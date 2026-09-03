@@ -45,9 +45,9 @@ before wiring it into the orchestrator.
 ## API
 
 ```python
-from gemini_live_client import GeminiLiveSession, AudioChunk, TurnComplete, Interrupted
+from gemini_live_client import GeminiLiveSession, AudioChunk, TurnComplete, Interrupted, ToolCallRequest
 
-async with GeminiLiveSession(system_instruction=persona_prompt) as session:
+async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_tools) as session:
     await session.send_audio(pcm16_16khz_bytes)   # one 20ms frame at a time
 
     async for event in session.receive_events():
@@ -55,13 +55,29 @@ async with GeminiLiveSession(system_instruction=persona_prompt) as session:
             case AudioChunk(data=pcm16_24khz_bytes): ...  # play it out
             case TurnComplete(): ...                       # model finished speaking
             case Interrupted(): ...                        # barge-in, see PROP-204
+            case ToolCallRequest(id=call_id, name=name, args=args):
+                result = await run_the_tool(name, args)
+                await session.send_tool_response(call_id, name, {"result": result})
 ```
 
 - Input: 16kHz mono PCM16 (matches PROP-103's resampler output).
 - Output: 24kHz mono PCM16 — the orchestrator will need to resample this
   back down to 8kHz G.711 for the SIP leg.
+- `tools`: a `list[types.Tool]` — see `services/orchestrator/tool_client.py`
+  for building these from the Tool Router's `/tools/schema`.
+- `send_text()` exists for testing tool-calling/text turns without a
+  mic — not used in the real call path (that's always `send_audio`).
 
 ## Definition of Done (from Sprint Plan)
 
-- [ ] `test_mic_call.py` round-trips real speech through Gemini.
-- [ ] `GeminiLiveSession` importable and usable from `services/orchestrator/`.
+- [x] `GeminiLiveSession` importable and usable from `services/orchestrator/`.
+- [x] Tool-calling wired: `ToolCallRequest` events + `send_tool_response()`,
+      **live-verified** 2026-09-03 — a real text query ("Do you have any
+      3 bedroom houses in Austin under 550 thousand dollars?") correctly
+      triggered a `search_properties` call with properly-parsed structured
+      args, executed against real Postgres data via the Tool Router, and
+      Gemini spoke a real response incorporating the result (437KB of
+      audio). This is the plan's Sprint 3 demo scenario, working end to end.
+- [ ] `test_mic_call.py` round-trips real speech through Gemini (needs a
+      real mic — the tool-calling path above was verified via text input
+      instead, since this sandbox has no audio hardware).

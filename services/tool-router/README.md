@@ -77,13 +77,16 @@ number), invalid enum rejected with 422, and the SQL injection attempt.
 - [x] SQL injection prevention & schema parameter validation (PROP-307).
 - [x] Tenant isolation enforced by Postgres RLS, not just app-level
       filtering, verified with a real cross-tenant test (PROP-601).
-- [ ] Registered as an actual Gemini tool in the orchestrator (Sprint 3/4
-      wiring — the schema endpoint exists for this, not yet consumed).
-- [ ] PROP-306 (latency + **context injection** integration testing) is
-      only partially covered: these tests exercise the real DB path
-      end to end, but "context injection" specifically means verifying
-      tool results actually land in Gemini's conversation context, which
-      isn't possible to test until the orchestrator-to-Gemini tool wiring
-      above exists. Not marked done.
+- [x] Registered as an actual Gemini tool in the orchestrator —
+      `services/orchestrator/tool_client.py` builds `FunctionDeclaration`s
+      straight from `/tools/schema` (single source of truth) and dispatches
+      calls to `/tools/call`. **Live-verified** 2026-09-03: a real Gemini
+      session correctly called `search_properties` from a natural-language
+      query and spoke a response using the real result.
+- [x] PROP-306's "context injection" half is now verifiable and passing —
+      the live test above confirms tool results actually land in Gemini's
+      conversation context (the spoken response correctly referenced the
+      returned listings' price and address). The "latency" half of
+      PROP-306 is still open (see below).
 - [ ] Latency budget (plan: <900ms including DB query, or filler speech
       within 300ms) not yet measured under load.
