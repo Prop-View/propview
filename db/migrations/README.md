@@ -2,14 +2,46 @@
 
 Owner: Aahil (Dev A)
 
-PostgreSQL + pgvector schema for listings/knowledge base, the CRM tables
-(contacts, leads, appointments, interactions), and the Row-Level Security
-policies for multi-tenant isolation.
+PostgreSQL + pgvector schema for listings, projects, and the knowledge
+base. `apply_migrations.py` runs every `*.sql` file here in order,
+tracking what's applied in a `schema_migrations` table so re-running is
+safe.
 
-- **PROP-301** — Listings, projects, pgvector schema
-- **PROP-401** — Contacts, leads, appointments, interactions schema
-- **PROP-601** — Row-Level Security (RLS) for `tenant_id` isolation
+## Local setup
 
-Per the architecture reference, the Lead Engine (scoring/rules) and Session
-Store (Redis) are kept as distinct stores rather than folded into these
-CRM tables — see `../../docs/architecture.md`.
+```bash
+brew install postgresql@17 pgvector   # pgvector's bottle targets 17/18, not 16
+brew services start postgresql@17
+createdb propview_dev
+
+pip install -r requirements.txt
+DATABASE_URL=postgresql://localhost/propview_dev python apply_migrations.py
+```
+
+**Verified** 2026-09-03 against a real local instance: schema applies
+cleanly, `CREATE EXTENSION vector` succeeds (v0.8.6), a `search_properties`-
+style filtered query returns correct results, and a real cosine-distance
+nearest-neighbor query against `knowledge_base_chunks` correctly finds the
+closest embedding.
+
+## Schema
+
+- **`projects`** — a development/building a property may belong to.
+- **`properties`** — the actual listings: address, type, beds/baths/sqft,
+  price, status, amenities (JSONB), all indexed for the filter patterns
+  `search_properties` (PROP-304) will use.
+- **`knowledge_base_chunks`** — pgvector-backed RAG source (brochures,
+  FAQs, policies, transcripts). `embedding` is `vector(768)`, matching
+  Gemini's `text-embedding-004` — **must match whatever model PROP-302's
+  ingestion script (not yet built) actually uses**, or inserts will fail
+  loudly (pgvector enforces the column's fixed dimension).
+
+`tenant_id` (default `'default'`) is on every table now, with no RLS
+policies yet — PROP-601 (Sprint 6) only needs to add policies on top of
+this rather than restructure the schema later.
+
+## Definition of Done (from Sprint Plan)
+
+- [x] Schema designed and applied against a real PostgreSQL + pgvector instance.
+- [x] Verified: property filter query and vector similarity search both correct.
+- [ ] CRM tables (contacts/leads/appointments) are PROP-401, Sprint 4 — separate migration.
