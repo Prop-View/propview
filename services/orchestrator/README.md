@@ -1,15 +1,46 @@
-# PROP-105 / PROP-106: Orchestrator Event Loop + Session Store
+# PROP-105 / PROP-106 / PROP-206: Orchestrator, Session Store & Telemetry
 
 Bridges a LiveKit room's caller audio to a Gemini Live session
 (`../gemini-client/`): subscribes to the caller's track, forwards audio
 to Gemini, publishes Gemini's spoken response back into the room.
 `session_store.py` (PROP-106) gives it a place to look up which room a
-`call_id` belongs to, in Redis, with automatic expiry.
+`call_id` belongs to, in Redis, with automatic expiry. `telemetry.py`
+(PROP-206) emits OpenTelemetry spans and structured JSON logs for the
+call's lifecycle.
 
-PROP-106 didn't have a directory assigned in the original project scaffold
-— it's here rather than under `infra/` because it's runtime call-session
-lookup logic the orchestrator itself owns, not a deployment/provisioning
-concern.
+Neither PROP-106 nor PROP-206 had a directory assigned in the original
+project scaffold — both are here rather than under `infra/` because
+they're runtime logic the orchestrator itself owns and calls directly,
+not a deployment/provisioning concern. (`infra/observability/` still
+covers the *deployment* side — Grafana dashboards, an OTel collector — once
+there's real infra to point at.)
+
+## Telemetry (PROP-206)
+
+`CallTelemetry` wraps one OTel span per call plus structured JSON logs
+matching the Sprint Plan's exact schema (section 5): `correlation_id`
+(call_id/session_id/tenant_id), `service`, `event`, `metrics`, `payload`.
+Emits on: `call_started`, `caller_audio_subscribed`, `first_response_audio`
+(with `response_latency_ms`), `turn_complete`, `interrupted`, `error`,
+`call_ended` (with `call_duration_ms`).
+
+**Honest scope note**: `response_latency_ms` measures time from the
+agent's last `TurnComplete` to its next `AudioChunk` — an approximation of
+per-turn response latency, not the plan's precisely-defined TTFA
+(`Timestamp(First Audio Byte Sent) - Timestamp(User Finished Speaking)`).
+Gemini's Live API doesn't surface an explicit "user finished speaking"
+timestamp to the client in the current integration. Refining this with
+Gemini's `input_transcription`/`waiting_for_input` signals is a documented
+future improvement, not implemented here.
+
+Defaults to a console span exporter for local dev; set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to ship to a real collector once one exists
+(Sprint 6 / PROP-603).
+
+**Verified live** 2026-09-03 as part of the full orchestrator test: real
+spans exported with correct `call_id`/`room_name` attributes and
+`response_latency_ms` values, structured JSON logs matching the schema
+exactly, `call_started`/`call_ended` both firing.
 
 ## Important finding from building this
 
@@ -105,6 +136,9 @@ Gemini side — the two aren't yet exercised in the same run.
       Redis including actual TTL expiry timing (PROP-106).
 - [x] `main.py` composes GeminiLiveSession + SessionStore + CallOrchestrator
       into one runnable process, verified live end-to-end (see above).
+- [x] OpenTelemetry spans + structured JSON logs tracking call_id and
+      per-turn response latency, verified live (PROP-206).
+- [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).
 - [ ] Barge-in buffer clearing wired to real VAD signal (PROP-203/204, Sprint 2) —

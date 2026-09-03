@@ -27,6 +27,7 @@ from livekit import rtc
 
 from gemini_live_client import AudioChunk, Interrupted, TurnComplete
 from session_store import SessionStore
+from telemetry import CallTelemetry
 
 logger = logging.getLogger("orchestrator")
 
@@ -59,11 +60,13 @@ class CallOrchestrator:
         self._room = room
         self._gemini = gemini_session
         self._session_store = session_store
+        self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name)
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
         self._forwarded_track_sids: set[str] = set()
 
     async def start(self) -> None:
+        self._telemetry.start()
         if self._session_store is not None:
             await self._session_store.create_session(call_id=self._room.name, room_name=self._room.name)
 
@@ -102,6 +105,7 @@ class CallOrchestrator:
             return
         self._forwarded_track_sids.add(track.sid)
         logger.info("Subscribed to caller audio track from %s", participant.identity)
+        self._telemetry.record_track_subscribed(participant.identity)
         self._tasks.append(asyncio.create_task(self._forward_caller_audio_to_gemini(track)))
 
     async def _forward_caller_audio_to_gemini(self, track: rtc.Track) -> None:
@@ -111,8 +115,9 @@ class CallOrchestrator:
                 await self._gemini.send_audio(bytes(event.frame.data))
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Caller audio forwarding to Gemini stopped unexpectedly")
+            self._telemetry.record_error("caller_audio_forwarding", exc)
             raise
         finally:
             await stream.aclose()
@@ -122,13 +127,15 @@ class CallOrchestrator:
             await self._run_forward_gemini_audio_to_room()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Gemini audio forwarding to room stopped unexpectedly")
+            self._telemetry.record_error("gemini_audio_forwarding", exc)
             raise
 
     async def _run_forward_gemini_audio_to_room(self) -> None:
         async for event in self._gemini.receive_events():
             if isinstance(event, AudioChunk):
+                self._telemetry.record_response_audio()
                 frame = rtc.AudioFrame(
                     data=event.data,
                     sample_rate=GEMINI_OUTPUT_RATE_HZ,
@@ -138,8 +145,10 @@ class CallOrchestrator:
                 await self._publish_source.capture_frame(frame)
             elif isinstance(event, TurnComplete):
                 logger.debug("Gemini turn complete")
+                self._telemetry.record_turn_complete()
             elif isinstance(event, Interrupted):
                 logger.info("Gemini turn interrupted (barge-in) -- clearing playout queue")
+                self._telemetry.record_interrupted()
                 self._publish_source.clear_queue()
 
     async def aclose(self) -> None:
@@ -148,3 +157,4 @@ class CallOrchestrator:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         if self._session_store is not None:
             await self._session_store.end_session(call_id=self._room.name)
+        self._telemetry.end()
