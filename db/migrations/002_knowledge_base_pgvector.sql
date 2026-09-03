@@ -1,11 +1,11 @@
 -- PROP-301: pgvector-backed knowledge base for RAG over brochures/FAQs/policies.
 --
--- Embedding dimension is 768 (matches Gemini's text-embedding-004 output).
--- This MUST match whatever embedding model PROP-302 (ingestion script,
--- not yet built) actually uses -- pgvector enforces the column's fixed
--- dimension at insert time, so a mismatch fails loudly rather than
--- silently corrupting data, but the model choice still needs to be
--- confirmed when PROP-302 is built.
+-- Embedding dimension is 768. Originally documented as matching
+-- text-embedding-004, but that model doesn't exist for the account this
+-- was built against -- db/ingestion/ (PROP-302) uses gemini-embedding-001
+-- with output_dimensionality=768 explicitly (its default is 3072).
+-- pgvector enforces this column's fixed dimension at insert time, so a
+-- mismatch fails loudly rather than silently corrupting data.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 

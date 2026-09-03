@@ -1,4 +1,4 @@
-# PROP-303 / PROP-304 / PROP-307: Tool Router
+# PROP-303 / PROP-304 / PROP-307: Tool Router (+ search_knowledge_base)
 
 FastAPI service dispatching S2S function-call payloads (tool name + args,
 matching Gemini's tool-calling protocol) to real database-backed handlers.
@@ -8,7 +8,7 @@ matching Gemini's tool-calling protocol) to real database-backed handlers.
 ```bash
 cd services/tool-router
 pip install -r requirements.txt
-cp .env.example .env   # DATABASE_URL -- must be the propview_app role, NOT the superuser (see below)
+cp .env.example .env   # DATABASE_URL (propview_app role, not superuser) + GEMINI_API_KEY for search_knowledge_base
 uvicorn main:app --reload
 ```
 
@@ -36,9 +36,17 @@ POST /tools/call
   {"name": "get_property_details", "args": {"property_id": 42}}
   -> {"name": "get_property_details", "result": {...} | null}
 
-GET /tools/schema   -- JSON schema per tool, source for the Gemini
-                        FunctionDeclaration configs the orchestrator will
-                        register (Sprint 3/4 wiring, not built yet)
+POST /tools/call
+  {"name": "search_knowledge_base", "args": {"query": "how much are the HOA dues?"}}
+  -> {"name": "search_knowledge_base", "result": [{"content": "...", "source_type": "faq", "source_name": "..."}]}
+  -- semantic search over db/ingestion's (PROP-302) pgvector-embedded
+  -- FAQs/brochures/policies. Embeds the query with the same model +
+  -- dimensionality ingestion uses; a mismatch there would silently
+  -- degrade to poor/random matches, not an error (see the module docstring).
+
+GET /tools/schema   -- JSON schema per tool, the source for the Gemini
+                        FunctionDeclarations services/orchestrator/tool_client.py
+                        builds (no hand-duplicated schemas)
 GET /health
 ```
 
@@ -63,12 +71,14 @@ It's treated as a literal (non-matching) string; the table survives.
 DATABASE_URL=postgresql://propview_app:devpassword@localhost/propview_dev python -m pytest tests/ -v
 ```
 
-**Verified passing** 2026-09-03: all 12 cases against a real local
+**Verified passing** 2026-09-03: all 13 cases against a real local
 Postgres, connected as `propview_app` (not the superuser, so RLS is
 genuinely enforced, not silently bypassed) — correct filtering, tenant
 isolation at both the app-query and RLS layers, JSONB/Decimal correctly
 normalized to JSON-safe types (`amenities` as a list, `price` as a
-number), invalid enum rejected with 422, and the SQL injection attempt.
+number), invalid enum rejected with 422, the SQL injection attempt, and
+`search_knowledge_base` returning a real semantic match for a query with
+no words in common with the source chunk.
 
 ## Definition of Done (from Sprint Plan)
 

@@ -14,11 +14,13 @@ from pydantic import BaseModel, ValidationError
 
 from db import close_pool, get_pool, tenant_connection
 from tools.get_property_details import GetPropertyDetailsArgs, get_property_details
+from tools.search_knowledge_base import SearchKnowledgeBaseArgs, search_knowledge_base
 from tools.search_properties import SearchPropertiesArgs, search_properties
 
 TOOLS: dict[str, tuple[type[BaseModel], Any]] = {
     "search_properties": (SearchPropertiesArgs, search_properties),
     "get_property_details": (GetPropertyDetailsArgs, get_property_details),
+    "search_knowledge_base": (SearchKnowledgeBaseArgs, search_knowledge_base),
 }
 
 

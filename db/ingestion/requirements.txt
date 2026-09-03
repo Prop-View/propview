@@ -1,0 +1,6 @@
+google-genai>=1.75.0
+asyncpg>=0.31.0
+pgvector>=0.5.0
+pypdf>=5.0.0
+pytest>=8.0.0
+pytest-asyncio>=1.4.0

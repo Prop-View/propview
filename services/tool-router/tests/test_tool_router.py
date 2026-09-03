@@ -142,6 +142,50 @@ def test_unknown_tool_returns_404(client):
     assert resp.status_code == 404
 
 
-def test_tools_schema_lists_both_tools(client):
+def test_tools_schema_lists_all_tools(client):
     resp = client.get("/tools/schema")
-    assert set(resp.json().keys()) == {"search_properties", "get_property_details"}
+    assert set(resp.json().keys()) == {"search_properties", "get_property_details", "search_knowledge_base"}
+
+
+@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="needs a real Gemini API key")
+def test_search_knowledge_base_semantic_match(client):
+    """Seeds one real-embedded chunk, then queries with different wording
+    to confirm this is genuine semantic search, not a text match."""
+    from google import genai
+    from google.genai import types
+
+    genai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    embedding = (
+        genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents="The HOA fee for this property is $200 per month.",
+            config=types.EmbedContentConfig(output_dimensionality=768),
+        )
+        .embeddings[0]
+        .values
+    )
+
+    async def seed():
+        import asyncpg
+        from pgvector.asyncpg import register_vector
+
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        await register_vector(conn)
+        await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
+        await conn.execute("DELETE FROM knowledge_base_chunks WHERE tenant_id = $1", TEST_TENANT)
+        await conn.execute(
+            "INSERT INTO knowledge_base_chunks (tenant_id, source_type, source_name, content, embedding) "
+            "VALUES ($1, 'faq', 'test.txt', $2, $3)",
+            TEST_TENANT,
+            "The HOA fee for this property is $200 per month.",
+            embedding,
+        )
+        await conn.close()
+
+    asyncio.run(seed())
+
+    resp = call_tool(client, "search_knowledge_base", {"query": "How much are the monthly homeowners association dues?"})
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert len(result) > 0
+    assert "HOA fee" in result[0]["content"]

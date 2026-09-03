@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
+from pgvector.asyncpg import register_vector
 
 _pool: asyncpg.Pool | None = None
 
@@ -14,7 +15,10 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         database_url = os.environ.get("DATABASE_URL", "postgresql://localhost/propview_dev")
-        _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
+        # init=register_vector runs on every pooled connection so
+        # search_knowledge_base.py can bind Python lists to `vector` columns
+        # directly -- without it asyncpg has no idea how to encode them.
+        _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10, init=register_vector)
     return _pool
 
 
