@@ -1,4 +1,4 @@
-# PROP-105 / PROP-106 / PROP-206: Orchestrator, Session Store & Telemetry
+# PROP-105 / PROP-106 / PROP-206 / PROP-305: Orchestrator, Session Store, Telemetry & Vocal Filler
 
 Bridges a LiveKit room's caller audio to a Gemini Live session
 (`../gemini-client/`): subscribes to the caller's track, forwards audio
@@ -58,6 +58,36 @@ AudioStream/AudioSource already cover 8kHz↔16kHz end to end, and stacking a
 second (lower-quality, linear-interpolation) resampler on top would only
 hurt audio quality for no benefit. It stays available for any future path
 that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
+
+## Interactive Vocal Filler (PROP-305)
+
+`vocal_filler.py`'s `VocalFillerPlayer` masks slow tool calls (the plan's
+>500ms threshold) with a pre-recorded filler clip ("Let me check our
+active listings for you...") played directly onto the agent's LiveKit
+track — bypassing Gemini entirely, since Gemini itself is synchronously
+blocked awaiting the function response for the duration of the call and
+has no "say something while you wait" affordance. `_handle_tool_call`
+races a filler-start task against the real tool call: a fast (<500ms)
+call never triggers any filler audio, a slow one does, and it's cut off
+(mid-clip if needed) the instant the real result is ready, before
+Gemini's real spoken answer starts. A caller barging in mid-filler
+interrupts it exactly like any other agent speech (`_active_filler` is
+tracked alongside `_agent_speaking` for this).
+
+Clips are pre-recorded (`filler_audio/*.wav`, 24kHz mono PCM16, matching
+`GEMINI_OUTPUT_RATE_HZ` — no resampling needed), not generated live: TTS
+on the fly would itself take real time, defeating the purpose. **Known
+limitation**: the filler voice (macOS `say`, en-US) is audibly a
+different speaker from Gemini's own TTS voice — acceptable for masking a
+~1s DB query, but a production system would want these generated via the
+same voice/engine Gemini uses instead.
+
+**Verified live** 2026-09-04 (`tests/test_vocal_filler_live.py`) against
+a real LiveKit server: a fake tool call sleeping 1.5s produced real
+filler audio frames on the caller's subscribed track (150 received,
+`filler_played: true` in the structured log), cut off once the fake tool
+result resolved. `tests/test_vocal_filler.py` covers the
+play/no-play/cancel logic in isolation with fakes (3/3 passing).
 
 ## Setup
 
@@ -174,6 +204,8 @@ result.
       `clear_queue()` fired within one 20ms audio frame of speech onset,
       and the `interrupted` OTel span event recorded
       `source="vap_predictive"`.
+- [x] Interactive Vocal Filler masking tool-call latency >500ms
+      (PROP-305) — see dedicated section above. Live-verified 2026-09-04.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).

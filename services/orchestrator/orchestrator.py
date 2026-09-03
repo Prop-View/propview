@@ -33,6 +33,7 @@ from session_store import SessionStore
 from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
 from transcript_store import save_interaction
+from vocal_filler import VocalFillerPlayer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
@@ -42,6 +43,7 @@ logger = logging.getLogger("orchestrator")
 GEMINI_INPUT_RATE_HZ = 16000
 GEMINI_OUTPUT_RATE_HZ = 24000
 AGENT_TRACK_NAME = "agent-voice"
+DEFAULT_FILLER_DELAY_SECONDS = 0.5  # plan's threshold for "tool calls expected to exceed 500ms"
 
 
 class AudioChunkLike(Protocol):
@@ -69,6 +71,7 @@ class CallOrchestrator:
         database_url: str | None = None,
         tenant_id: str = "default",
         vad_detector: SpeechActivityDetector | None = None,
+        filler_delay_seconds: float = DEFAULT_FILLER_DELAY_SECONDS,
     ):
         self._room = room
         self._gemini = gemini_session
@@ -76,6 +79,7 @@ class CallOrchestrator:
         self._tool_client = tool_client
         self._database_url = database_url
         self._tenant_id = tenant_id
+        self._filler_delay_seconds = filler_delay_seconds
         # None disables predictive barge-in entirely (e.g. lightweight unit
         # tests) -- Gemini's own reactive Interrupted signal still works
         # either way, this only adds the faster local path on top of it.
@@ -92,6 +96,12 @@ class CallOrchestrator:
         # actual interruption (PROP-203) rather than every time the caller
         # speaks during their own turn.
         self._agent_speaking = False
+        # Set only while a PROP-305 filler clip is playing during a slow
+        # tool call, so a barge-in mid-filler can actually cancel it (see
+        # _handle_predictive_speech_start) -- clear_queue() alone only
+        # drops already-captured frames, it doesn't stop the filler's
+        # capture loop from refilling the queue with the rest of the clip.
+        self._active_filler: VocalFillerPlayer | None = None
 
     async def start(self) -> None:
         self._telemetry.start()
@@ -192,6 +202,8 @@ class CallOrchestrator:
                 self._telemetry.record_interrupted(source="gemini")
                 self._agent_speaking = False
                 self._publish_source.clear_queue()
+                if self._active_filler is not None:
+                    self._tasks.append(asyncio.create_task(self._active_filler.stop()))
             elif isinstance(event, ToolCallRequest):
                 await self._handle_tool_call(event)
             elif isinstance(event, TranscriptChunk):
@@ -210,6 +222,14 @@ class CallOrchestrator:
         self._telemetry.record_interrupted(source="vap_predictive")
         self._agent_speaking = False
         self._publish_source.clear_queue()
+        if self._active_filler is not None:
+            # A barge-in during PROP-305 filler audio: clear_queue() alone
+            # only drops frames already handed to LiveKit -- the filler's
+            # own capture loop would otherwise keep refilling the queue
+            # with the rest of the clip. Cancel it too; _handle_tool_call's
+            # `finally` clause still runs its own stop()/clear_queue() once
+            # the tool call itself resolves, so this is safe to call twice.
+            self._tasks.append(asyncio.create_task(self._active_filler.stop()))
 
     def _record_transcript_chunk(self, chunk: TranscriptChunk) -> None:
         # Transcription streams incrementally and "is independent to the
@@ -229,6 +249,18 @@ class CallOrchestrator:
 
         logger.info("Tool call: %s(%r)", call.name, call.args)
         started_at = time.monotonic()
+
+        # PROP-305: mask latency on slow tool calls (DB queries, calendar
+        # lookups, ...) with filler speech, since Gemini itself is
+        # synchronously blocked awaiting this response and can't generate
+        # anything else in the meantime. Filler audio counts as the agent
+        # "speaking" for barge-in purposes -- a caller talking over a
+        # filler clip should interrupt it exactly like any other agent
+        # speech (handled by the shared _agent_speaking flag).
+        filler = VocalFillerPlayer(self._publish_source, delay_seconds=self._filler_delay_seconds)
+        filler.start()
+        self._active_filler = filler
+        self._agent_speaking = True
         try:
             result = await self._tool_client.call_tool(call.name, call.args)
             error = None
@@ -236,12 +268,20 @@ class CallOrchestrator:
             logger.exception("Tool call %s failed", call.name)
             result = None
             error = str(exc)
+        finally:
+            self._active_filler = None
+            await filler.stop()
+            # Cut off any filler audio still queued/playing so it can't
+            # overlap Gemini's real response, which starts as soon as
+            # send_tool_response() below returns.
+            self._publish_source.clear_queue()
+            self._agent_speaking = False
 
         execution_time_ms = (time.monotonic() - started_at) * 1000
         log_event(
             "tool_execution_completed",
             self._room.name,
-            metrics={"execution_time_ms": round(execution_time_ms, 1)},
+            metrics={"execution_time_ms": round(execution_time_ms, 1), "filler_played": filler.played},
             payload={"tool_name": call.name, "args": call.args, "error": error},
             level="ERROR" if error else "INFO",
         )
