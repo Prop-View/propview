@@ -1,4 +1,4 @@
-# PROP-505: Fair Housing Compliance Filter
+# PROP-505 / PROP-506: Fair Housing Filter & PII Masking
 
 Deterministic, rule-based pre-filter for demographic/steering questions —
 defense in depth alongside `../prompts/system_prompt.py`'s instruction-based
@@ -35,7 +35,7 @@ matched *specific* protected-class instances ("christian", "muslim"), so
 Fixed by adding the generic category terms (religion, race, ethnicity,
 national origin, etc.) alongside specific instances.
 
-## Definition of Done (from Sprint Plan)
+## Definition of Done — PROP-505 (from Sprint Plan)
 
 - [x] Filter implemented and tested against the plan's own example scenarios.
 - [ ] Not wired into the orchestrator's live call flow yet, and it's a
@@ -51,3 +51,52 @@ national origin, etc.) alongside specific instances.
       before the *next* turn rather than the current one. Left as a
       standalone, fully tested module rather than shipping a
       race-condition-prone partial integration.
+
+---
+
+## PROP-506: PII Masking (regex + Presidio)
+
+`pii_masking.py` masks caller-identifying and financial PII
+(`PERSON`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `CREDIT_CARD`, `US_SSN`,
+`US_BANK_NUMBER`) in transcripts before they're stored in
+`interactions.transcript` (`db/migrations/003_crm_schema.sql`).
+
+Presidio's built-in recognizers are already a regex+NLP hybrid (phone/
+email/credit-card/SSN are regex-based; `PERSON` uses spaCy NER) — that
+combination is what "regex + Presidio" in the plan refers to, not a
+separate hand-rolled layer stacked on top.
+
+**Deliberately does not mask property addresses or prices** — those are
+business data this CRM needs, not PII to hide from itself.
+
+### Setup
+
+```bash
+cd services/compliance
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm   # small model -- our recognizers are mostly regex-based anyway
+```
+
+### Testing
+
+```bash
+python -m pytest tests/test_pii_masking.py -v
+```
+
+**Verified** 2026-09-03: 10/10 passing — name, phone, email, credit card,
+and SSN all correctly masked; addresses and prices correctly left alone.
+
+One real, instructive bug the tests caught: the initial SSN test fixture
+used `123-45-6789`, which Presidio **deliberately** deny-lists as a
+well-known canonical placeholder/example SSN — not a bug in Presidio or
+this code, but in the test itself for picking the one SSN Presidio is
+specifically built to ignore. Traced via Presidio's own
+`UsSsnRecognizer.invalidate_result()` source rather than assumed, then
+fixed by using a non-placeholder number in the test.
+
+### Definition of Done — PROP-506 (from Sprint Plan)
+
+- [x] PII masking implemented (regex + Presidio) and tested.
+- [ ] Not yet wired into the actual write path for `interactions.transcript`
+      (no code currently writes call transcripts to that table at all —
+      the orchestrator doesn't build/store a transcript yet).
