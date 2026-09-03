@@ -59,6 +59,30 @@ second (lower-quality, linear-interpolation) resampler on top would only
 hurt audio quality for no benefit. It stays available for any future path
 that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
 
+## Lead qualification context (PROP-402)
+
+`_handle_tool_call` threads two pieces of call-scoped context to the Tool
+Router alongside every tool call, only actually consumed by
+`update_lead_qualification` (`../tool-router/tools/update_lead_qualification.py`):
+- `caller_phone_number` — captured from the SIP participant's
+  `sip.phoneNumber` attribute when their track is first subscribed
+  (`_capture_caller_phone_number`). **Not yet exercised against a real
+  SIP call** (PROP-101/102 aren't deployed) — falls back to a synthetic
+  `unknown-<room-name>` id so the tool never fails, but that's not a
+  reusable real phone number. Real SIP deployment will need to confirm
+  LiveKit actually sets that exact attribute key.
+- `lead_id` — `None` until the first `update_lead_qualification` call in
+  a given call returns one, then reused for every subsequent call so
+  repeated BANT captures update the same `leads` row instead of creating
+  a new one per field learned.
+
+Not yet live-verified against a real Gemini session actually deciding to
+call `update_lead_qualification` mid-conversation (unlike
+`search_properties`, which has been, see below) — the wiring itself
+(`tool_client.py`'s `caller_phone_number`/`lead_id` passthrough) is a thin,
+directly-inspectable change, and `../tool-router/tests/test_tool_router.py`
+already verifies the DB-side logic against real Postgres.
+
 ## Interactive Vocal Filler (PROP-305)
 
 `vocal_filler.py`'s `VocalFillerPlayer` masks slow tool calls (the plan's

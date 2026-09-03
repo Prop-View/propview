@@ -102,6 +102,14 @@ class CallOrchestrator:
         # drops already-captured frames, it doesn't stop the filler's
         # capture loop from refilling the queue with the rest of the clip.
         self._active_filler: VocalFillerPlayer | None = None
+        # PROP-402: who's calling, and which lead row this call has already
+        # created (so repeated update_lead_qualification calls within one
+        # call update the same row instead of creating a new one per
+        # field learned). Both threaded through to the Tool Router as
+        # call-scoped context in _handle_tool_call, never exposed to
+        # Gemini's function schema.
+        self._caller_phone_number: str | None = None
+        self._lead_id: int | None = None
 
     async def start(self) -> None:
         self._telemetry.start()
@@ -144,7 +152,21 @@ class CallOrchestrator:
         self._forwarded_track_sids.add(track.sid)
         logger.info("Subscribed to caller audio track from %s", participant.identity)
         self._telemetry.record_track_subscribed(participant.identity)
+        self._capture_caller_phone_number(participant)
         self._tasks.append(asyncio.create_task(self._forward_caller_audio_to_gemini(track)))
+
+    def _capture_caller_phone_number(self, participant) -> None:
+        # LiveKit's SIP bridge sets "sip.phoneNumber" on the SIP
+        # participant's attributes (PROP-101/102, not yet deployed here --
+        # so this is exercised so far only by tests that set it manually).
+        # Falls back to a synthetic per-call id so update_lead_qualification
+        # (PROP-402) always has *something* to key a contact record on --
+        # not a reusable real phone number, a known limitation until real
+        # telephony is wired up.
+        if self._caller_phone_number is not None:
+            return
+        phone_number = getattr(participant, "attributes", {}).get("sip.phoneNumber")
+        self._caller_phone_number = phone_number or f"unknown-{self._room.name}"
 
     async def _forward_caller_audio_to_gemini(self, track: rtc.Track) -> None:
         stream = rtc.AudioStream.from_track(track=track, sample_rate=GEMINI_INPUT_RATE_HZ, num_channels=1)
@@ -262,8 +284,12 @@ class CallOrchestrator:
         self._active_filler = filler
         self._agent_speaking = True
         try:
-            result = await self._tool_client.call_tool(call.name, call.args)
+            result = await self._tool_client.call_tool(
+                call.name, call.args, caller_phone_number=self._caller_phone_number, lead_id=self._lead_id
+            )
             error = None
+            if call.name == "update_lead_qualification" and "lead_id" in result:
+                self._lead_id = result["lead_id"]  # subsequent calls this turn update the same row
         except Exception as exc:  # noqa: BLE001 -- always report back to Gemini, even on failure
             logger.exception("Tool call %s failed", call.name)
             result = None

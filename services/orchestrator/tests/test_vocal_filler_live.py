@@ -44,7 +44,7 @@ def make_token(identity: str) -> str:
 class SlowFakeToolClient:
     """Simulates a tool call that takes TOOL_CALL_DELAY_SECONDS to resolve."""
 
-    async def call_tool(self, name: str, args: dict):
+    async def call_tool(self, name: str, args: dict, caller_phone_number: str | None = None, lead_id=None):
         await asyncio.sleep(TOOL_CALL_DELAY_SECONDS)
         return {"listings": []}
 

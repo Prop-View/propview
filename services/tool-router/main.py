@@ -16,12 +16,21 @@ from db import close_pool, get_pool, tenant_connection
 from tools.get_property_details import GetPropertyDetailsArgs, get_property_details
 from tools.search_knowledge_base import SearchKnowledgeBaseArgs, search_knowledge_base
 from tools.search_properties import SearchPropertiesArgs, search_properties
+from tools.update_lead_qualification import UpdateLeadQualificationArgs, update_lead_qualification
 
 TOOLS: dict[str, tuple[type[BaseModel], Any]] = {
     "search_properties": (SearchPropertiesArgs, search_properties),
     "get_property_details": (GetPropertyDetailsArgs, get_property_details),
     "search_knowledge_base": (SearchKnowledgeBaseArgs, search_knowledge_base),
+    "update_lead_qualification": (UpdateLeadQualificationArgs, update_lead_qualification),
 }
+
+# Tools needing call-scoped context beyond tenant_id (who's calling, which
+# lead row this call has already created) -- never exposed to Gemini's
+# function schema, since Gemini has no reliable way to know either. Just
+# update_lead_qualification today; a special case here rather than
+# generic kwarg-forwarding plumbing for every tool, since only one needs it.
+CONTEXT_ARG_TOOLS = {"update_lead_qualification"}
 
 
 @asynccontextmanager
@@ -38,6 +47,8 @@ class ToolCallRequest(BaseModel):
     name: str
     args: dict[str, Any] = {}
     tenant_id: str = "default"
+    caller_phone_number: str | None = None
+    lead_id: int | None = None
 
 
 @app.post("/tools/call")
@@ -51,8 +62,15 @@ async def call_tool(request: ToolCallRequest):
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
+    extra_kwargs = {}
+    if request.name in CONTEXT_ARG_TOOLS:
+        extra_kwargs = {"caller_phone_number": request.caller_phone_number, "lead_id": request.lead_id}
+
     async with tenant_connection(request.tenant_id) as connection:
-        result = await handler(connection, args, tenant_id=request.tenant_id)
+        try:
+            result = await handler(connection, args, tenant_id=request.tenant_id, **extra_kwargs)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"name": request.name, "result": result}
 
 

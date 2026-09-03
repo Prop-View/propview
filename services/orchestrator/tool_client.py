@@ -27,9 +27,23 @@ class ToolRouterClient:
         ]
         return [types.Tool(function_declarations=declarations)]
 
-    async def call_tool(self, name: str, args: dict) -> dict:
+    async def call_tool(
+        self, name: str, args: dict, caller_phone_number: str | None = None, lead_id: int | None = None
+    ) -> dict:
+        """`caller_phone_number`/`lead_id` are call-scoped context, not
+        something Gemini supplies -- like `tenant_id`, they're bound at the
+        orchestrator layer (see orchestrator.py's _handle_tool_call) and
+        only actually used server-side by update_lead_qualification
+        (PROP-402); harmless no-ops for every other tool."""
         resp = await self._client.post(
-            "/tools/call", json={"name": name, "args": args, "tenant_id": self._tenant_id}
+            "/tools/call",
+            json={
+                "name": name,
+                "args": args,
+                "tenant_id": self._tenant_id,
+                "caller_phone_number": caller_phone_number,
+                "lead_id": lead_id,
+            },
         )
         resp.raise_for_status()
         return resp.json()["result"]

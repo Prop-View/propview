@@ -1,4 +1,4 @@
-# PROP-303 / PROP-304 / PROP-307: Tool Router (+ search_knowledge_base)
+# PROP-303 / PROP-304 / PROP-307 / PROP-402: Tool Router
 
 FastAPI service dispatching S2S function-call payloads (tool name + args,
 matching Gemini's tool-calling protocol) to real database-backed handlers.
@@ -44,11 +44,45 @@ POST /tools/call
   -- dimensionality ingestion uses; a mismatch there would silently
   -- degrade to poor/random matches, not an error (see the module docstring).
 
+POST /tools/call
+  {"name": "update_lead_qualification", "args": {"intent": "buy", "budget_min": 500000, "timeline": "immediate"},
+   "tenant_id": "default", "caller_phone_number": "+15125550100", "lead_id": null}
+  -> {"name": "update_lead_qualification",
+      "result": {"lead_id": 7, "contact_id": 3, "priority": "high", "captured": {...full leads row...}}}
+  -- PROP-402/405: upserts the caller's contacts row (by phone number) and
+  -- their leads row (by lead_id if given, else creates one -- see below),
+  -- re-scoring priority (../../lead-engine/lead_scoring.py) every call.
+  -- caller_phone_number/lead_id are call-scoped context the orchestrator
+  -- supplies directly (like tenant_id) -- not part of Gemini's function
+  -- schema, see tools/update_lead_qualification.py's docstring.
+
 GET /tools/schema   -- JSON schema per tool, the source for the Gemini
                         FunctionDeclarations services/orchestrator/tool_client.py
                         builds (no hand-duplicated schemas)
 GET /health
 ```
+
+## BANT extraction (PROP-402) & lead scoring (PROP-405)
+
+`update_lead_qualification` **is** PROP-402's "state extraction parser" —
+not a separate NLP pass over the transcript. Gemini calls it directly as
+it learns BANT facts during natural conversation (the same mechanism
+`search_properties` already uses), per the field-by-field triggers in
+`../prompts/bant_conversation_design.md` and the instructions in
+`../prompts/system_prompt.py`. A standalone post-hoc parser would
+duplicate extraction Gemini is already doing to decide what to say next.
+
+Every call re-scores the lead via `../lead-engine/lead_scoring.py`
+(PROP-405) — a small ordered rules table over `intent`/`budget`/`timeline`
+(High: urgent timeline + budget + real intent; Low: browsing/exploring or
+nothing captured yet; Medium in between) — so `leads.priority` always
+reflects the fullest picture captured so far, not a one-time snapshot.
+
+Repeated calls within the same phone call reuse the same `leads` row via
+`lead_id` (threaded by the orchestrator, see its README) rather than
+creating a new lead per field learned; calls without a `lead_id` (a fresh
+call, or a repeat caller with no active `lead_id` yet) create a new lead
+for that contact.
 
 ## SQL injection prevention (PROP-307)
 
@@ -80,6 +114,15 @@ number), invalid enum rejected with 422, the SQL injection attempt, and
 `search_knowledge_base` returning a real semantic match for a query with
 no words in common with the source chunk.
 
+**Verified passing** 2026-09-04: 5 more cases for `update_lead_qualification`
+against the same real Postgres — missing `caller_phone_number` rejected
+with 422, a fresh call creates both a `contacts` and `leads` row with the
+correct rules-engine priority, a second call with the same phone number
+reuses the `contacts` row, passing `lead_id` back updates the same `leads`
+row instead of creating a new one (re-scoring as more fields arrive), and
+omitted fields never overwrite already-captured ones (`COALESCE`, not a
+blind overwrite).
+
 ## Definition of Done (from Sprint Plan)
 
 - [x] FastAPI Tool Router service handling function-call payloads (PROP-303).
@@ -100,3 +143,9 @@ no words in common with the source chunk.
       PROP-306 is still open (see below).
 - [ ] Latency budget (plan: <900ms including DB query, or filler speech
       within 300ms) not yet measured under load.
+- [x] BANT qualification state extraction (PROP-402) as a Gemini tool call
+      — see dedicated section above. Verified against real Postgres; not
+      yet live-verified against a real Gemini call (unlike
+      `search_properties`) — `../orchestrator/README.md` tracks this.
+- [x] Lead scoring rules engine, High/Medium/Low (PROP-405) — see
+      `../lead-engine/lead_scoring.py`, 9/9 unit tests passing.

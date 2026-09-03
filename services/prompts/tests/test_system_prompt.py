@@ -26,3 +26,8 @@ def test_fair_housing_rule_present():
 def test_prompt_instructs_brevity_for_voice():
     prompt = build_system_prompt()
     assert "one or two sentences" in prompt
+
+
+def test_prompt_instructs_bant_tool_use():
+    prompt = build_system_prompt()
+    assert "update_lead_qualification" in prompt

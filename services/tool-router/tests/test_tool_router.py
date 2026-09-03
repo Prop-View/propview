@@ -29,6 +29,8 @@ async def _seed() -> None:
     # after enabling RLS, not assumed.
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
+    await conn.execute("DELETE FROM leads WHERE tenant_id = $1", TEST_TENANT)
+    await conn.execute("DELETE FROM contacts WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute(
         """
@@ -47,6 +49,8 @@ async def _seed() -> None:
 async def _cleanup() -> None:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
+    await conn.execute("DELETE FROM leads WHERE tenant_id = $1", TEST_TENANT)
+    await conn.execute("DELETE FROM contacts WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
     await conn.close()
 
@@ -59,8 +63,17 @@ def client():
     asyncio.run(_cleanup())
 
 
-def call_tool(client, name, args, tenant_id=TEST_TENANT):
-    return client.post("/tools/call", json={"name": name, "args": args, "tenant_id": tenant_id})
+def call_tool(client, name, args, tenant_id=TEST_TENANT, caller_phone_number=None, lead_id=None):
+    return client.post(
+        "/tools/call",
+        json={
+            "name": name,
+            "args": args,
+            "tenant_id": tenant_id,
+            "caller_phone_number": caller_phone_number,
+            "lead_id": lead_id,
+        },
+    )
 
 
 def test_health(client):
@@ -144,7 +157,99 @@ def test_unknown_tool_returns_404(client):
 
 def test_tools_schema_lists_all_tools(client):
     resp = client.get("/tools/schema")
-    assert set(resp.json().keys()) == {"search_properties", "get_property_details", "search_knowledge_base"}
+    assert set(resp.json().keys()) == {
+        "search_properties",
+        "get_property_details",
+        "search_knowledge_base",
+        "update_lead_qualification",
+    }
+
+
+def test_update_lead_qualification_requires_caller_phone_number(client):
+    resp = call_tool(client, "update_lead_qualification", {"intent": "buy"})
+    assert resp.status_code == 422
+
+
+def test_update_lead_qualification_creates_contact_and_lead(client):
+    resp = call_tool(
+        client,
+        "update_lead_qualification",
+        {"caller_full_name": "Jane Doe", "intent": "buy", "budget_min": 500000, "timeline": "immediate"},
+        caller_phone_number="+15125550100",
+    )
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["priority"] == "high"  # urgent timeline + budget + buy intent
+    assert result["captured"]["intent"] == "buy"
+    assert result["captured"]["budget_min"] == 500000
+
+
+def test_update_lead_qualification_second_call_same_phone_reuses_contact(client):
+    first = call_tool(
+        client,
+        "update_lead_qualification",
+        {"intent": "buy"},
+        caller_phone_number="+15125550101",
+    )
+    second = call_tool(
+        client,
+        "update_lead_qualification",
+        {"timeline": "1-3mo"},
+        caller_phone_number="+15125550101",
+    )
+    assert first.json()["result"]["contact_id"] == second.json()["result"]["contact_id"]
+    # No lead_id passed either time -- each call without one creates a new
+    # lead row for that contact (a repeat caller without an active
+    # in-progress call gets a fresh lead, not silently merged into an old
+    # one). The orchestrator is what threads lead_id across turns *within*
+    # one call -- see services/orchestrator/orchestrator.py.
+    assert first.json()["result"]["lead_id"] != second.json()["result"]["lead_id"]
+
+
+def test_update_lead_qualification_repeated_calls_with_lead_id(client):
+    first = call_tool(
+        client,
+        "update_lead_qualification",
+        {"intent": "sell", "budget_max": 700000},
+        caller_phone_number="+15125550102",
+    )
+    lead_id = first.json()["result"]["lead_id"]
+    assert first.json()["result"]["priority"] == "medium"  # budget + real intent, no urgent timeline yet
+
+    second = call_tool(
+        client,
+        "update_lead_qualification",
+        {"timeline": "immediate"},
+        caller_phone_number="+15125550102",
+        lead_id=lead_id,
+    )
+    result = second.json()["result"]
+    assert result["lead_id"] == lead_id  # same row, not a new one
+    assert result["captured"]["intent"] == "sell"  # earlier field preserved via COALESCE
+    assert result["captured"]["timeline"] == "immediate"  # new field applied
+    assert result["priority"] == "high"  # re-scored with the fuller picture
+
+
+def test_update_lead_qualification_null_fields_do_not_erase_existing_values(client):
+    first = call_tool(
+        client,
+        "update_lead_qualification",
+        {"intent": "rent", "budget_min": 2000},
+        caller_phone_number="+15125550103",
+    )
+    lead_id = first.json()["result"]["lead_id"]
+
+    second = call_tool(
+        client,
+        "update_lead_qualification",
+        {"decision_maker": "solo"},  # intent/budget omitted, not explicitly nulled
+        caller_phone_number="+15125550103",
+        lead_id=lead_id,
+    )
+    result = second.json()["result"]["captured"]
+    assert result["intent"] == "rent"
+    assert result["budget_min"] == 2000
+    assert result["decision_maker"] == "solo"
 
 
 @pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="needs a real Gemini API key")
