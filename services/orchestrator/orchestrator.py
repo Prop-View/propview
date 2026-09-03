@@ -26,6 +26,7 @@ from typing import Protocol
 from livekit import rtc
 
 from gemini_live_client import AudioChunk, Interrupted, TurnComplete
+from session_store import SessionStore
 
 logger = logging.getLogger("orchestrator")
 
@@ -49,14 +50,23 @@ class GeminiSessionLike(Protocol):
 class CallOrchestrator:
     """Bridges one LiveKit room's caller audio to a Gemini Live session."""
 
-    def __init__(self, room: rtc.Room, gemini_session: GeminiSessionLike):
+    def __init__(
+        self,
+        room: rtc.Room,
+        gemini_session: GeminiSessionLike,
+        session_store: SessionStore | None = None,
+    ):
         self._room = room
         self._gemini = gemini_session
+        self._session_store = session_store
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
         self._forwarded_track_sids: set[str] = set()
 
     async def start(self) -> None:
+        if self._session_store is not None:
+            await self._session_store.create_session(call_id=self._room.name, room_name=self._room.name)
+
         self._publish_source = rtc.AudioSource(sample_rate=GEMINI_OUTPUT_RATE_HZ, num_channels=1)
         track = rtc.LocalAudioTrack.create_audio_track(AGENT_TRACK_NAME, self._publish_source)
         await self._room.local_participant.publish_track(
@@ -136,3 +146,5 @@ class CallOrchestrator:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._session_store is not None:
+            await self._session_store.end_session(call_id=self._room.name)

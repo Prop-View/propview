@@ -10,3 +10,7 @@ infra/livekit/sip-config.yaml
 services/audio-pipeline/*.so
 services/audio-pipeline/*.dylib
 .pytest_cache/
+
+# local dev artifacts
+dump.rdb
+.claude/

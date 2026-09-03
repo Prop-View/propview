@@ -25,6 +25,7 @@ from livekit import api, rtc
 
 from gemini_live_client import AudioChunk, TurnComplete
 from orchestrator import GEMINI_INPUT_RATE_HZ, GEMINI_OUTPUT_RATE_HZ, CallOrchestrator
+from session_store import SessionStore
 
 LIVEKIT_URL = "ws://localhost:7880"
 API_KEY = "devkey"
@@ -76,9 +77,13 @@ async def main() -> None:
     await agent_room.connect(LIVEKIT_URL, make_token("ai-agent"))
     print("Both participants connected.")
 
+    session_store = SessionStore(redis_url="redis://localhost:6379")
     fake_gemini = FakeGeminiSession()
-    orchestrator = CallOrchestrator(room=agent_room, gemini_session=fake_gemini)
+    orchestrator = CallOrchestrator(room=agent_room, gemini_session=fake_gemini, session_store=session_store)
     await orchestrator.start()
+
+    session = await session_store.get_session(agent_room.name)
+    print(f"Session store: {'created' if session else 'MISSING'} session for room {agent_room.name!r}")
 
     # Caller publishes a synthetic "phone leg" audio track, as livekit-sip would.
     caller_source = rtc.AudioSource(sample_rate=CALLER_SIP_RATE, num_channels=1)
@@ -144,10 +149,15 @@ async def main() -> None:
         f = agent_frames_received[0]
         print(f"  First frame: sample_rate={f.sample_rate}, samples_per_channel={f.samples_per_channel}")
 
-    ok = len(fake_gemini.received_chunks) > 0 and len(agent_frames_received) > 0
+    ok = len(fake_gemini.received_chunks) > 0 and len(agent_frames_received) > 0 and session is not None
     print("\nRESULT:", "PASS" if ok else "FAIL")
 
     await orchestrator.aclose()
+    session_after_close = await session_store.get_session(agent_room.name)
+    print(f"Session after aclose(): {'still present (BUG)' if session_after_close else 'correctly removed'}")
+    ok = ok and session_after_close is None
+
+    await session_store.aclose()
     await caller_room.disconnect()
     await agent_room.disconnect()
     sys.exit(0 if ok else 1)

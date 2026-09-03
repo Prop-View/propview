@@ -1,8 +1,15 @@
-# PROP-105: Orchestrator Event Loop
+# PROP-105 / PROP-106: Orchestrator Event Loop + Session Store
 
 Bridges a LiveKit room's caller audio to a Gemini Live session
 (`../gemini-client/`): subscribes to the caller's track, forwards audio
 to Gemini, publishes Gemini's spoken response back into the room.
+`session_store.py` (PROP-106) gives it a place to look up which room a
+`call_id` belongs to, in Redis, with automatic expiry.
+
+PROP-106 didn't have a directory assigned in the original project scaffold
+— it's here rather than under `infra/` because it's runtime call-session
+lookup logic the orchestrator itself owns, not a deployment/provisioning
+concern.
 
 ## Important finding from building this
 
@@ -26,11 +33,28 @@ that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
 ```bash
 cd services/orchestrator
 pip install -r requirements.txt
+cp .env.example .env   # REDIS_URL, defaults to localhost
 # gemini_live_client must be importable -- either install ../gemini-client
 # as a package, or run with both dirs on PYTHONPATH (see the test for the pattern)
 ```
 
+For local Redis: `brew install redis && brew services start redis` (or
+`redis-server` directly). See `../../infra/redis/README.md` for cloud
+deployment options.
+
 ## Testing
+
+`tests/test_session_store.py` runs against a **real Redis instance** (not
+mocked — the point is to verify actual TTL/expiry timing):
+
+```bash
+redis-server &   # or: brew services start redis
+python -m pytest tests/test_session_store.py -v
+```
+
+**Verified passing** 2026-09-03: all 7 cases, including a real 2.5s wait
+to confirm TTL-based expiry and a touch()-refreshes-TTL check.
+
 
 `tests/test_orchestrator_live.py` is a **live integration test**, not a
 pytest unit test — it needs a real LiveKit server:
@@ -54,6 +78,11 @@ Gemini side — the two aren't yet exercised in the same run.
 
 - [x] Orchestrator event loop connects LiveKit audio frames to Gemini.
 - [x] Verified live against a real LiveKit server (fake Gemini session).
+- [x] Redis session store: create/get/end/touch, verified against real
+      Redis including actual TTL expiry timing (PROP-106).
+- [ ] Orchestrator wired to actually call `SessionStore.create_session()`
+      when a call starts (not yet connected — session_store.py exists as
+      a tested, standalone module; the orchestrator doesn't call it yet).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Barge-in buffer clearing wired to real VAD signal (PROP-203/204, Sprint 2) —
       `Interrupted` events already call `clear_queue()`, but that event only
