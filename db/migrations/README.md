@@ -35,6 +35,13 @@ closest embedding.
   Gemini's `text-embedding-004` — **must match whatever model PROP-302's
   ingestion script (not yet built) actually uses**, or inserts will fail
   loudly (pgvector enforces the column's fixed dimension).
+- **`contacts` / `leads` / `appointments` / `interactions`** (PROP-401) —
+  the CRM tables. `leads`' BANT fields (intent, budget, timeline,
+  decision_maker) follow `services/prompts/bant_conversation_design.md`
+  and are nullable throughout — the plan targets >80% of *fields*
+  captured, not full qualification on every call. `interactions.call_id`
+  ties a durable record back to `services/orchestrator/session_store.py`'s
+  ephemeral Redis session.
 
 `tenant_id` (default `'default'`) is on every table now, with no RLS
 policies yet — PROP-601 (Sprint 6) only needs to add policies on top of
@@ -44,4 +51,6 @@ this rather than restructure the schema later.
 
 - [x] Schema designed and applied against a real PostgreSQL + pgvector instance.
 - [x] Verified: property filter query and vector similarity search both correct.
-- [ ] CRM tables (contacts/leads/appointments) are PROP-401, Sprint 4 — separate migration.
+- [x] PROP-401 CRM schema: contacts/leads/appointments/interactions, verified
+      against real Postgres (insert flow, CHECK constraint rejection,
+      cascade deletes, unique-phone-per-tenant), 4/4 pytest passing.
