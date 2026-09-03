@@ -4,6 +4,7 @@ Per-sprint documentation deliverables land here as they're written.
 
 - **PROP-109** — Sprint 1 local setup and deployment steps
 - **PROP-208** — Turn-taking state machine and buffer clearing specs
+  (`sprint-2-turn-taking.md`)
 - **PROP-607** — Agency onboarding guide & API documentation
 - **PROP-608** — Soft launch pilot deployment notes (Agency Partner 1)
 

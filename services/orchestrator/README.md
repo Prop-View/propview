@@ -103,7 +103,7 @@ mocked — the point is to verify actual TTL/expiry timing):
 
 ```bash
 redis-server &   # or: brew services start redis
-python -m pytest tests/test_session_store.py -v
+python -m pytest tests/test_session_store.py tests/test_transcript_store.py tests/test_orchestrator_barge_in.py -v
 ```
 
 **Verified passing** 2026-09-03: all 7 cases, including a real 2.5s wait
@@ -128,6 +128,13 @@ on the agent's published track. Real speech + real Gemini wasn't tested
 together here since PROP-104's separate live test already validated the
 Gemini side — the two aren't yet exercised in the same run.
 
+`tests/test_predictive_barge_in_live.py` is the same kind of live test,
+focused on PROP-202/203: real LiveKit server, real Silero ONNX VAD, a
+real recorded-speech WAV as the "caller," and a fake Gemini that never
+stops talking on its own (isolates the predictive path). **Verified
+passing** 2026-09-04 — see the barge-in section above for the exact
+result.
+
 ## Definition of Done (from Sprint Plan)
 
 - [x] Orchestrator event loop connects LiveKit audio frames to Gemini.
@@ -145,9 +152,41 @@ Gemini side — the two aren't yet exercised in the same run.
       real `search_properties` call → real Postgres data → real spoken
       response, wired through `main.py`. Closes the "not yet registered
       as a Gemini tool" gap noted in the Tool Router's own README.
+- [x] Speech transcription captured both directions (`TranscriptChunk`,
+      `../gemini-client/`) and, on call end, PII-masked
+      (`../compliance/pii_masking.py`, PROP-506) and persisted to
+      `interactions.transcript` via `transcript_store.py` — the write path
+      PROP-506's own README had flagged as missing. `DATABASE_URL` unset
+      skips it entirely (safe no-op for local dev without Postgres).
+- [x] Predictive barge-in (PROP-202/203/204): `../vap-sidecar/`'s Silero
+      VAD runs in-process on every caller audio frame; a detected speech
+      onset during agent playback clears the playout queue immediately,
+      without waiting on Gemini's own server round-trip `Interrupted`
+      signal. `_agent_speaking` tracks which source (VAP or Gemini) is
+      "first" for a given interruption so both can coexist safely —
+      `telemetry.record_interrupted(source=...)` tags which one fired.
+      Set `ENABLE_PREDICTIVE_BARGE_IN=false` to disable and fall back to
+      Gemini's reactive signal only. **Verified live** 2026-09-04
+      (`tests/test_predictive_barge_in_live.py`) against a real LiveKit
+      server: a real caller track publishing real recorded speech, real
+      Silero ONNX inference, and a fake continuously-talking Gemini
+      (isolates the predictive path from Gemini's own reactive signal) —
+      `clear_queue()` fired within one 20ms audio frame of speech onset,
+      and the `interrupted` OTel span event recorded
+      `source="vap_predictive"`.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).
-- [ ] Barge-in buffer clearing wired to real VAD signal (PROP-203/204, Sprint 2) —
-      `Interrupted` events already call `clear_queue()`, but that event only
-      fires from Gemini's own server-side interruption detection for now.
+- [ ] Word-level transcript truncation at the exact millisecond of
+      interruption (the plan's literal PROP-204 wording) — Gemini's
+      `output_transcription` streams in text chunks, not per-word
+      timestamps, so the current implementation truncates at
+      utterance/chunk granularity instead. Noted as a known gap, not
+      silently approximated.
+- [ ] AEC3 (PROP-201): not implemented. This architecture never actually
+      needs it — the caller is a SIP/PSTN participant and the agent is a
+      separate LiveKit participant publishing its own track, so there's no
+      local mic-hears-its-own-speaker loop for AEC to cancel (that's a
+      browser-softphone problem). Real PSTN-side echo, if any, is the
+      telco/SIP trunk's concern, not this service's. See
+      `../vap-sidecar/README.md`.

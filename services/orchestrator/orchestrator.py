@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
+from pathlib import Path
 from typing import Protocol
 
 from livekit import rtc
@@ -31,6 +33,9 @@ from session_store import SessionStore
 from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
 from transcript_store import save_interaction
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
+from vap_processor import SpeechActivityDetector  # noqa: E402
 
 logger = logging.getLogger("orchestrator")
 
@@ -63,6 +68,7 @@ class CallOrchestrator:
         tool_client: ToolRouterClient | None = None,
         database_url: str | None = None,
         tenant_id: str = "default",
+        vad_detector: SpeechActivityDetector | None = None,
     ):
         self._room = room
         self._gemini = gemini_session
@@ -70,6 +76,10 @@ class CallOrchestrator:
         self._tool_client = tool_client
         self._database_url = database_url
         self._tenant_id = tenant_id
+        # None disables predictive barge-in entirely (e.g. lightweight unit
+        # tests) -- Gemini's own reactive Interrupted signal still works
+        # either way, this only adds the faster local path on top of it.
+        self._vad = vad_detector
         self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name)
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
@@ -77,6 +87,11 @@ class CallOrchestrator:
         self._transcript_lines: list[str] = []
         self._transcript_buffer: dict[str, str] = {"caller": "", "agent": ""}
         self._call_started_at = time.monotonic()
+        # Tracks whether the agent's audio is currently playing out, so a VAD
+        # speech_started event only triggers a CLEAR_BUFFER when it's an
+        # actual interruption (PROP-203) rather than every time the caller
+        # speaks during their own turn.
+        self._agent_speaking = False
 
     async def start(self) -> None:
         self._telemetry.start()
@@ -125,7 +140,12 @@ class CallOrchestrator:
         stream = rtc.AudioStream.from_track(track=track, sample_rate=GEMINI_INPUT_RATE_HZ, num_channels=1)
         try:
             async for event in stream:
-                await self._gemini.send_audio(bytes(event.frame.data))
+                pcm16_bytes = bytes(event.frame.data)
+                if self._vad is not None:
+                    for speech_event in self._vad.process(pcm16_bytes):
+                        if speech_event.kind == "speech_started":
+                            self._handle_predictive_speech_start()
+                await self._gemini.send_audio(pcm16_bytes)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -149,6 +169,7 @@ class CallOrchestrator:
         async for event in self._gemini.receive_events():
             if isinstance(event, AudioChunk):
                 self._telemetry.record_response_audio()
+                self._agent_speaking = True
                 frame = rtc.AudioFrame(
                     data=event.data,
                     sample_rate=GEMINI_OUTPUT_RATE_HZ,
@@ -158,15 +179,37 @@ class CallOrchestrator:
                 await self._publish_source.capture_frame(frame)
             elif isinstance(event, TurnComplete):
                 logger.debug("Gemini turn complete")
+                self._agent_speaking = False
                 self._telemetry.record_turn_complete()
             elif isinstance(event, Interrupted):
+                # Gemini's own (reactive) barge-in signal -- arrives after a
+                # server round trip. If the VAP sidecar already predictively
+                # cleared the queue for this same interruption (see
+                # _handle_predictive_speech_start), _agent_speaking is
+                # already False here; clear_queue() is still safe to call
+                # again (no-op on an already-empty queue).
                 logger.info("Gemini turn interrupted (barge-in) -- clearing playout queue")
-                self._telemetry.record_interrupted()
+                self._telemetry.record_interrupted(source="gemini")
+                self._agent_speaking = False
                 self._publish_source.clear_queue()
             elif isinstance(event, ToolCallRequest):
                 await self._handle_tool_call(event)
             elif isinstance(event, TranscriptChunk):
                 self._record_transcript_chunk(event)
+
+    def _handle_predictive_speech_start(self) -> None:
+        """PROP-203: the VAP sidecar detected caller speech onset locally --
+        no round trip to Gemini needed. If the agent is mid-utterance, clear
+        its playout buffer immediately rather than waiting for Gemini's own
+        (reactive) Interrupted event, which only arrives after Gemini has
+        itself processed enough caller audio to recognize the interruption.
+        This is what gets barge-in under the plan's 80ms target."""
+        if not self._agent_speaking:
+            return  # caller speaking during their own turn, not an interruption
+        logger.info("VAP predicted caller speech onset during agent playback -- clearing playout queue")
+        self._telemetry.record_interrupted(source="vap_predictive")
+        self._agent_speaking = False
+        self._publish_source.clear_queue()
 
     def _record_transcript_chunk(self, chunk: TranscriptChunk) -> None:
         # Transcription streams incrementally and "is independent to the

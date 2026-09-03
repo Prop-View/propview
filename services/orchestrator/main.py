@@ -25,6 +25,7 @@ from pathlib import Path
 # orchestrator module it imports) can find them without manual PYTHONPATH setup.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gemini-client"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "prompts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 
 from dotenv import load_dotenv
 from livekit import api, rtc
@@ -34,6 +35,7 @@ from orchestrator import CallOrchestrator
 from session_store import SessionStore
 from system_prompt import build_system_prompt
 from tool_client import ToolRouterClient
+from vap_processor import SpeechActivityDetector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -47,6 +49,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")  # optional -- transcript saving s
 AGENT_IDENTITY = "ai-agent"
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 TENANT_ID = os.environ.get("TENANT_ID", "default")
+ENABLE_PREDICTIVE_BARGE_IN = os.environ.get("ENABLE_PREDICTIVE_BARGE_IN", "true").lower() != "false"
 
 
 def make_token(room_name: str) -> str:
@@ -84,6 +87,9 @@ async def run_call(room_name: str) -> None:
     async with GeminiLiveSession(
         system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
     ) as gemini_session:
+        # One detector per call -- its VADIterator carries hysteresis state
+        # across audio windows, so it must not be shared between calls.
+        vad_detector = SpeechActivityDetector() if ENABLE_PREDICTIVE_BARGE_IN else None
         orchestrator = CallOrchestrator(
             room=room,
             gemini_session=gemini_session,
@@ -91,6 +97,7 @@ async def run_call(room_name: str) -> None:
             tool_client=tool_client,
             database_url=DATABASE_URL,
             tenant_id=TENANT_ID,
+            vad_detector=vad_detector,
         )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")

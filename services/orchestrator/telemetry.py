@@ -158,10 +158,13 @@ class CallTelemetry:
             self._span.add_event("turn_complete")
         log_event("turn_complete", self._call_id, self._session_id, self._tenant_id)
 
-    def record_interrupted(self) -> None:
+    def record_interrupted(self, source: str = "gemini") -> None:
+        """`source` distinguishes Gemini's own (reactive, server-side) barge-in
+        signal from the VAP sidecar's (predictive, fires on caller speech
+        onset without waiting on a round trip) -- see PROP-203."""
         if self._span:
-            self._span.add_event("interrupted")
-        log_event("interrupted", self._call_id, self._session_id, self._tenant_id)
+            self._span.add_event("interrupted", {"source": source})
+        log_event("interrupted", self._call_id, self._session_id, self._tenant_id, payload={"source": source})
 
     def record_error(self, source: str, error: Exception) -> None:
         if self._span:
