@@ -43,6 +43,7 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8000")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # optional -- transcript saving skipped if unset
 AGENT_IDENTITY = "ai-agent"
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 TENANT_ID = os.environ.get("TENANT_ID", "default")
@@ -84,7 +85,12 @@ async def run_call(room_name: str) -> None:
         system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
     ) as gemini_session:
         orchestrator = CallOrchestrator(
-            room=room, gemini_session=gemini_session, session_store=session_store, tool_client=tool_client
+            room=room,
+            gemini_session=gemini_session,
+            session_store=session_store,
+            tool_client=tool_client,
+            database_url=DATABASE_URL,
+            tenant_id=TENANT_ID,
         )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")

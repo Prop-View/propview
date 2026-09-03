@@ -67,6 +67,11 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
   for building these from the Tool Router's `/tools/schema`.
 - `send_text()` exists for testing tool-calling/text turns without a
   mic — not used in the real call path (that's always `send_audio`).
+- `TranscriptChunk(speaker, text, finished)` — both directions transcribed
+  automatically (`input_audio_transcription`/`output_audio_transcription`
+  always enabled). Per Gemini's own docs, transcription "is independent
+  to the model turn" — these can interleave with `AudioChunk` events in
+  either order, don't assume strict ordering.
 
 ## Definition of Done (from Sprint Plan)
 
@@ -78,6 +83,12 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
       args, executed against real Postgres data via the Tool Router, and
       Gemini spoke a real response incorporating the result (437KB of
       audio). This is the plan's Sprint 3 demo scenario, working end to end.
+- [x] Speech transcription: `output_transcription` **live-verified**
+      2026-09-03 (a real Gemini response to "What is the capital of
+      Texas?" produced `TranscriptChunk(speaker="agent", text="Austin.")`).
+      `input_transcription` (caller side) is unverified here since it only
+      fires on real audio input, not `send_text()`, and this sandbox has
+      no mic.
 - [ ] `test_mic_call.py` round-trips real speech through Gemini (needs a
       real mic — the tool-calling path above was verified via text input
       instead, since this sandbox has no audio hardware).

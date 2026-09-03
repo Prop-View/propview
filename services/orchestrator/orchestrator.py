@@ -26,10 +26,11 @@ from typing import Protocol
 
 from livekit import rtc
 
-from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TurnComplete
+from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from session_store import SessionStore
 from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
+from transcript_store import save_interaction
 
 logger = logging.getLogger("orchestrator")
 
@@ -60,15 +61,22 @@ class CallOrchestrator:
         gemini_session: GeminiSessionLike,
         session_store: SessionStore | None = None,
         tool_client: ToolRouterClient | None = None,
+        database_url: str | None = None,
+        tenant_id: str = "default",
     ):
         self._room = room
         self._gemini = gemini_session
         self._session_store = session_store
         self._tool_client = tool_client
+        self._database_url = database_url
+        self._tenant_id = tenant_id
         self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name)
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
         self._forwarded_track_sids: set[str] = set()
+        self._transcript_lines: list[str] = []
+        self._transcript_buffer: dict[str, str] = {"caller": "", "agent": ""}
+        self._call_started_at = time.monotonic()
 
     async def start(self) -> None:
         self._telemetry.start()
@@ -157,6 +165,19 @@ class CallOrchestrator:
                 self._publish_source.clear_queue()
             elif isinstance(event, ToolCallRequest):
                 await self._handle_tool_call(event)
+            elif isinstance(event, TranscriptChunk):
+                self._record_transcript_chunk(event)
+
+    def _record_transcript_chunk(self, chunk: TranscriptChunk) -> None:
+        # Transcription streams incrementally and "is independent to the
+        # model turn" (Gemini's own docs) -- keep appending to a per-speaker
+        # buffer, and flush it as one labeled line once `finished` marks
+        # that utterance complete.
+        self._transcript_buffer[chunk.speaker] += chunk.text
+        if chunk.finished:
+            label = "Caller" if chunk.speaker == "caller" else "Agent"
+            self._transcript_lines.append(f"{label}: {self._transcript_buffer[chunk.speaker]}")
+            self._transcript_buffer[chunk.speaker] = ""
 
     async def _handle_tool_call(self, call: ToolCallRequest) -> None:
         if self._tool_client is None:
@@ -193,4 +214,25 @@ class CallOrchestrator:
             await self._session_store.end_session(call_id=self._room.name)
         if self._tool_client is not None:
             await self._tool_client.aclose()
+
+        # Flush any incomplete utterance still sitting in the per-speaker
+        # buffers (e.g. the call ended mid-sentence) so it isn't lost.
+        for speaker, text in self._transcript_buffer.items():
+            if text:
+                label = "Caller" if speaker == "caller" else "Agent"
+                self._transcript_lines.append(f"{label}: {text}")
+
+        if self._database_url is not None and self._transcript_lines:
+            duration_seconds = int(time.monotonic() - self._call_started_at)
+            try:
+                await save_interaction(
+                    database_url=self._database_url,
+                    tenant_id=self._tenant_id,
+                    call_id=self._room.name,
+                    transcript="\n".join(self._transcript_lines),
+                    duration_seconds=duration_seconds,
+                )
+            except Exception:
+                logger.exception("Failed to save interaction transcript")
+
         self._telemetry.end()

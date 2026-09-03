@@ -52,7 +52,24 @@ class ToolCallRequest:
     args: dict
 
 
-LiveEvent = AudioChunk | TurnComplete | Interrupted | ToolCallRequest
+@dataclass
+class TranscriptChunk:
+    """Speech-to-text transcription of either side of the call.
+
+    "The transcription is independent to the model turn which means it
+    doesn't imply any ordering between transcription and model turn"
+    (Gemini's own docs) -- so these can arrive interleaved with AudioChunk
+    events in either order, not strictly before/after. Consumers should
+    accumulate by `speaker` and use `finished` to know when one utterance
+    is complete, not assume strict ordering against audio events.
+    """
+
+    speaker: str  # "caller" or "agent"
+    text: str
+    finished: bool
+
+
+LiveEvent = AudioChunk | TurnComplete | Interrupted | ToolCallRequest | TranscriptChunk
 
 
 class GeminiLiveSession:
@@ -78,6 +95,8 @@ class GeminiLiveSession:
             response_modalities=["AUDIO"],
             system_instruction=system_instruction,
             tools=tools,
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
         )
         self._connect_cm = None
         self._session = None
@@ -135,6 +154,20 @@ class GeminiLiveSession:
 
                 if content.interrupted:
                     yield Interrupted()
+
+                if content.input_transcription and content.input_transcription.text:
+                    yield TranscriptChunk(
+                        speaker="caller",
+                        text=content.input_transcription.text,
+                        finished=bool(content.input_transcription.finished),
+                    )
+
+                if content.output_transcription and content.output_transcription.text:
+                    yield TranscriptChunk(
+                        speaker="agent",
+                        text=content.output_transcription.text,
+                        finished=bool(content.output_transcription.finished),
+                    )
 
                 if content.model_turn:
                     for part in content.model_turn.parts:
