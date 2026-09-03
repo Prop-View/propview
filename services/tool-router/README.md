@@ -1,4 +1,4 @@
-# PROP-303 / PROP-304 / PROP-307 / PROP-402: Tool Router
+# PROP-303 / PROP-304 / PROP-307 / PROP-402 / PROP-403 / PROP-404: Tool Router
 
 FastAPI service dispatching S2S function-call payloads (tool name + args,
 matching Gemini's tool-calling protocol) to real database-backed handlers.
@@ -55,6 +55,23 @@ POST /tools/call
   -- caller_phone_number/lead_id are call-scoped context the orchestrator
   -- supplies directly (like tenant_id) -- not part of Gemini's function
   -- schema, see tools/update_lead_qualification.py's docstring.
+
+POST /tools/call
+  {"name": "check_calendar_slots", "args": {"earliest": "2026-09-08T09:00:00", "search_days": 7}, "tenant_id": "default"}
+  -> {"name": "check_calendar_slots", "result": {"available_slots": [{"start": "...", "end": "..."}, ...]}}
+  -- PROP-403: up to 3 open slots (business hours minus Google Calendar
+  -- freebusy) via ../scheduling/calendar_client.py.
+
+POST /tools/call
+  {"name": "book_site_visit", "args": {"property_id": 42, "slot_start": "...", "slot_end": "..."},
+   "tenant_id": "default", "caller_phone_number": "+15125550100", "lead_id": 7}
+  -> {"name": "book_site_visit",
+      "result": {"appointment_id": 3, "calendar_event_id": "...", "scheduled_at": "...", "confirmation_sms_sent": true}}
+  -- PROP-403/404: books the calendar event (guarded by a Redis slot lock
+  -- against double-booking), writes an `appointments` row, dispatches an
+  -- SMS confirmation (best-effort -- booking still succeeds if SMS
+  -- fails). caller_phone_number/lead_id are call-scoped context, same
+  -- treatment as update_lead_qualification.
 
 GET /tools/schema   -- JSON schema per tool, the source for the Gemini
                         FunctionDeclarations services/orchestrator/tool_client.py
@@ -123,6 +140,17 @@ row instead of creating a new one (re-scoring as more fields arrive), and
 omitted fields never overwrite already-captured ones (`COALESCE`, not a
 blind overwrite).
 
+**Verified passing** 2026-09-04: 5 more cases for `check_calendar_slots`/
+`book_site_visit` (`tests/test_booking.py`) against real Postgres + real
+Redis, with Google Calendar and Twilio mocked (no real credentials
+available — see `../scheduling/README.md`) — slot listing, a booking
+creating both the mocked calendar event and the `appointments` row plus a
+real SMS dispatch call, missing `caller_phone_number` rejected, a tenant
+with no calendar configured rejected, and — the actual double-booking
+scenario the Redis lock exists for — a slot the mocked calendar reports
+busy gets rejected by the re-check-under-lock rather than silently
+double-booked.
+
 ## Definition of Done (from Sprint Plan)
 
 - [x] FastAPI Tool Router service handling function-call payloads (PROP-303).
@@ -149,3 +177,10 @@ blind overwrite).
       `search_properties`) — `../orchestrator/README.md` tracks this.
 - [x] Lead scoring rules engine, High/Medium/Low (PROP-405) — see
       `../lead-engine/lead_scoring.py`, 9/9 unit tests passing.
+- [x] Google Calendar API integration for slot reading/booking (PROP-403)
+      and SMS/WhatsApp confirmation dispatch (PROP-404) — see
+      `../scheduling/README.md` for the underlying clients and their
+      (mocked-credentials) test coverage.
+- [x] Redis distributed locking on calendar slot keys to prevent
+      double-booking (Sprint 4 risk mitigation) — verified with a real
+      concurrent-booking-rejected test case.

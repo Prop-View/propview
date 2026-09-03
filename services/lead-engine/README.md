@@ -56,7 +56,6 @@ since it needs the DB the scoring function itself doesn't.
 - [x] BANT qualification state extraction (as Gemini function calling,
       see above).
 - [x] Lead scoring rules engine, High/Medium/Low priority tagger.
-- [ ] Live-verified against a real Gemini call actually deciding to call
-      `update_lead_qualification` mid-conversation (unlike
-      `search_properties`, which has been) — tracked in
-      `../orchestrator/README.md`.
+- [x] Live-verified against a real Gemini call actually deciding to call
+      `update_lead_qualification` mid-conversation — 2026-09-04, see
+      `../orchestrator/README.md`'s "Lead qualification context" section.

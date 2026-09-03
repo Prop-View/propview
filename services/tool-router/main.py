@@ -13,6 +13,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from db import close_pool, get_pool, tenant_connection
+from redis_client import close_redis_client
+from tools.book_site_visit import BookSiteVisitArgs, book_site_visit
+from tools.check_calendar_slots import CheckCalendarSlotsArgs, check_calendar_slots
 from tools.get_property_details import GetPropertyDetailsArgs, get_property_details
 from tools.search_knowledge_base import SearchKnowledgeBaseArgs, search_knowledge_base
 from tools.search_properties import SearchPropertiesArgs, search_properties
@@ -23,14 +26,16 @@ TOOLS: dict[str, tuple[type[BaseModel], Any]] = {
     "get_property_details": (GetPropertyDetailsArgs, get_property_details),
     "search_knowledge_base": (SearchKnowledgeBaseArgs, search_knowledge_base),
     "update_lead_qualification": (UpdateLeadQualificationArgs, update_lead_qualification),
+    "check_calendar_slots": (CheckCalendarSlotsArgs, check_calendar_slots),
+    "book_site_visit": (BookSiteVisitArgs, book_site_visit),
 }
 
 # Tools needing call-scoped context beyond tenant_id (who's calling, which
 # lead row this call has already created) -- never exposed to Gemini's
-# function schema, since Gemini has no reliable way to know either. Just
-# update_lead_qualification today; a special case here rather than
-# generic kwarg-forwarding plumbing for every tool, since only one needs it.
-CONTEXT_ARG_TOOLS = {"update_lead_qualification"}
+# function schema, since Gemini has no reliable way to know either. A
+# special case here rather than generic kwarg-forwarding plumbing for
+# every tool, since only these two need it.
+CONTEXT_ARG_TOOLS = {"update_lead_qualification", "book_site_visit"}
 
 
 @asynccontextmanager
@@ -38,6 +43,7 @@ async def lifespan(app: FastAPI):
     await get_pool()
     yield
     await close_pool()
+    await close_redis_client()
 
 
 app = FastAPI(title="Propview Tool Router", lifespan=lifespan)

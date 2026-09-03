@@ -1,0 +1,6 @@
+google-api-python-client>=2.196.0
+google-auth>=2.52.0
+twilio>=9.11.0
+redis>=8.1.0
+pytest>=8.0.0
+pytest-asyncio>=1.4.0

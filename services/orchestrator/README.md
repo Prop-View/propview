@@ -62,8 +62,8 @@ that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
 ## Lead qualification context (PROP-402)
 
 `_handle_tool_call` threads two pieces of call-scoped context to the Tool
-Router alongside every tool call, only actually consumed by
-`update_lead_qualification` (`../tool-router/tools/update_lead_qualification.py`):
+Router alongside every tool call, consumed by `update_lead_qualification`
+and `book_site_visit` (`../tool-router/tools/`):
 - `caller_phone_number` — captured from the SIP participant's
   `sip.phoneNumber` attribute when their track is first subscribed
   (`_capture_caller_phone_number`). **Not yet exercised against a real
@@ -76,12 +76,18 @@ Router alongside every tool call, only actually consumed by
   repeated BANT captures update the same `leads` row instead of creating
   a new one per field learned.
 
-Not yet live-verified against a real Gemini session actually deciding to
-call `update_lead_qualification` mid-conversation (unlike
-`search_properties`, which has been, see below) — the wiring itself
-(`tool_client.py`'s `caller_phone_number`/`lead_id` passthrough) is a thin,
-directly-inspectable change, and `../tool-router/tests/test_tool_router.py`
-already verifies the DB-side logic against real Postgres.
+**Live-verified** 2026-09-04 (`tests/test_lead_qualification_live.py` —
+text-only via `send_text`, no LiveKit room needed for this one, just a
+running Tool Router + real Gemini API key): a real Gemini session, given
+"My budget is around six hundred thousand dollars and I'm hoping to move
+in the next month," correctly called
+`update_lead_qualification(budget_max=600000, intent="buy",
+timeline="immediate")` in the same turn it also searched listings, and
+the Tool Router round-trip returned `priority: "high"`. Caught and fixed
+a real bug in the process — the first two attempts silently exercised a
+stale Tool Router process from before PROP-402 existed, so the tool was
+never actually offered to Gemini; restarting it against current code is
+what surfaced the real result.
 
 ## Interactive Vocal Filler (PROP-305)
 

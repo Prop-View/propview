@@ -162,6 +162,8 @@ def test_tools_schema_lists_all_tools(client):
         "get_property_details",
         "search_knowledge_base",
         "update_lead_qualification",
+        "check_calendar_slots",
+        "book_site_visit",
     }
 
 
