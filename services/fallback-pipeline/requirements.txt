@@ -1,0 +1,6 @@
+deepgram-sdk>=7.8.1
+openai>=2.34.0
+cartesia>=4.2.0
+pytest>=8.0.0
+pytest-asyncio>=1.4.0
+certifi>=2024.0.0

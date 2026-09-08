@@ -1,4 +1,4 @@
-# PROP-105 / PROP-106 / PROP-206 / PROP-305 / PROP-503 / PROP-504: Orchestrator, Session Store, Telemetry, Vocal Filler & Human Transfer
+# PROP-105 / PROP-106 / PROP-206 / PROP-305 / PROP-501 / PROP-502 / PROP-503 / PROP-504: Orchestrator, Session Store, Telemetry, Vocal Filler, Cascaded Fallback & Human Transfer
 
 Bridges a LiveKit room's caller audio to a Gemini Live session
 (`../gemini-client/`): subscribes to the caller's track, forwards audio
@@ -58,6 +58,31 @@ AudioStream/AudioSource already cover 8kHz↔16kHz end to end, and stacking a
 second (lower-quality, linear-interpolation) resampler on top would only
 hurt audio quality for no benefit. It stays available for any future path
 that touches raw G.711 outside LiveKit (e.g. a non-LiveKit fallback stack).
+
+## Cascaded fallback & health monitor (PROP-501/502)
+
+`_switch_to_fallback()` swaps `self._gemini` from the primary
+`GeminiLiveSession` to a `../fallback-pipeline/cascaded_session.py`
+`CascadedFallbackSession` when `HealthMonitor` decides to (response
+latency >1200ms, or 2 consecutive session errors) — see
+`../fallback-pipeline/README.md` for the full design (why the fallback
+implements the exact same `GeminiSessionLike` protocol, the "no tools
+during fallback" scope decision, and how each of the three external
+clients was verified against its real API with a fake key). Both
+`health_monitor`/`fallback_session_factory` default to `None`, which
+disables the fallback entirely — a session error just ends the call, as
+it always did before this existed.
+
+**Real bug caught building this**: reassigning `self._gemini` alone
+doesn't redirect an already-running `_run_forward_gemini_audio_to_room`
+task -- its `async for event in self._gemini.receive_events():` bound
+one specific generator object at loop-start, from whichever session was
+active *then*. `_forward_gemini_audio_to_room` is now a supervisor loop
+that catches the resulting error, switches, and restarts the inner loop
+fresh against the new session (`tests/test_fallback_switch.py` covers
+this, including the case where both the caller-audio and Gemini-audio
+forwarding tasks hit errors around the same time and try to switch
+twice — idempotent, only one fallback session gets created).
 
 ## Lead qualification context (PROP-402)
 
@@ -275,6 +300,10 @@ result.
 - [x] SIP call transfer to a human broker (PROP-503) with a pre-transfer
       context SMS (PROP-504) — see dedicated section above. Not yet
       live-verified against real telephony (no SIP deployment exists).
+- [x] Cascaded fallback (PROP-501) + health monitor (PROP-502) — see
+      dedicated section above. Each external client (Deepgram/OpenAI/
+      Cartesia) reached its real API with a fake key; the swap mechanism
+      itself is unit-tested but not yet exercised against a real call.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).

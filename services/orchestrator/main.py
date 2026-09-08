@@ -26,11 +26,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gemini-client"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "prompts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
+sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"))  # append -- see tool-router/tools/_calendar_context.py
 
 from dotenv import load_dotenv
 from livekit import api, rtc
 
 from gemini_live_client import GeminiLiveSession
+from health_monitor import HealthMonitor
 from orchestrator import CallOrchestrator, build_gemini_tools
 from session_store import SessionStore
 from system_prompt import build_system_prompt
@@ -53,6 +55,37 @@ ENABLE_PREDICTIVE_BARGE_IN = os.environ.get("ENABLE_PREDICTIVE_BARGE_IN", "true"
 # PROP-503/504 -- unset skips transfer setup entirely (transfer_to_human_agent
 # then replies with a "not available" error rather than failing the call).
 BROKER_PHONE_NUMBER = os.environ.get("BROKER_PHONE_NUMBER")
+# PROP-501/502 -- all three unset skips the cascaded fallback entirely (a
+# session error/latency spike just ends the call, as it did before this existed).
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY")
+CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID")
+FALLBACK_LATENCY_THRESHOLD_MS = float(os.environ.get("FALLBACK_LATENCY_THRESHOLD_MS", "1200"))
+
+
+def _build_fallback_session_factory():
+    """None if the fallback isn't fully configured. Deliberately imports
+    CascadedFallbackSession lazily, inside here -- so a deployment that
+    never sets these env vars doesn't need deepgram-sdk/openai/cartesia
+    installed at all."""
+    if not (DEEPGRAM_API_KEY and OPENAI_API_KEY and CARTESIA_API_KEY and CARTESIA_VOICE_ID):
+        return None
+
+    async def factory():
+        from cascaded_session import CascadedFallbackSession
+
+        session = CascadedFallbackSession(
+            deepgram_api_key=DEEPGRAM_API_KEY,
+            openai_api_key=OPENAI_API_KEY,
+            cartesia_api_key=CARTESIA_API_KEY,
+            cartesia_voice_id=CARTESIA_VOICE_ID,
+            system_prompt=build_system_prompt(AGENCY_NAME),
+        )
+        await session.__aenter__()
+        return session
+
+    return factory
 
 
 def make_token(room_name: str) -> str:
@@ -89,6 +122,8 @@ async def run_call(room_name: str) -> None:
     gemini_tools = build_gemini_tools(remote_tools)
 
     lk_api = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) if BROKER_PHONE_NUMBER else None
+    fallback_session_factory = _build_fallback_session_factory()
+    health_monitor = HealthMonitor(latency_threshold_ms=FALLBACK_LATENCY_THRESHOLD_MS) if fallback_session_factory else None
 
     async with GeminiLiveSession(
         system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
@@ -106,6 +141,8 @@ async def run_call(room_name: str) -> None:
             vad_detector=vad_detector,
             lk_api=lk_api,
             broker_phone_number=BROKER_PHONE_NUMBER,
+            health_monitor=health_monitor,
+            fallback_session_factory=fallback_session_factory,
         )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")

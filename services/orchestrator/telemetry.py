@@ -134,13 +134,18 @@ class CallTelemetry:
             payload={"participant": participant_identity},
         )
 
-    def record_response_audio(self) -> None:
-        """Call on the first AudioChunk of a new agent response."""
+    def record_response_audio(self) -> float | None:
+        """Call on the first AudioChunk of a new agent response. Returns the
+        measured latency_ms (None if there was nothing to measure against,
+        e.g. the very first response of the call) -- PROP-502's health
+        monitor uses this to decide whether to trigger the cascaded
+        fallback, so it's returned rather than kept purely internal."""
         if self._response_in_progress:
-            return  # only the first chunk of a turn marks the response start
+            return None  # only the first chunk of a turn marks the response start
         self._response_in_progress = True
 
         metrics = {}
+        latency_ms = None
         if self._awaiting_response_since is not None:
             latency_ms = (time.monotonic() - self._awaiting_response_since) * 1000
             metrics["response_latency_ms"] = round(latency_ms, 1)
@@ -150,6 +155,7 @@ class CallTelemetry:
         if self._span:
             self._span.add_event("first_response_audio", metrics)
         log_event("first_response_audio", self._call_id, self._session_id, self._tenant_id, metrics=metrics)
+        return latency_ms
 
     def record_turn_complete(self) -> None:
         self._response_in_progress = False

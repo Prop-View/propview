@@ -24,7 +24,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from google.genai import types as genai_types
 from livekit import api, rtc
@@ -43,6 +43,9 @@ from vap_processor import SpeechActivityDetector  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))  # append, not insert(0) -- see tool-router/tools/_calendar_context.py
 from sms_dispatch import SmsDispatchError, send_sms  # noqa: E402
+
+sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"))
+from health_monitor import HealthMonitor  # noqa: E402
 
 logger = logging.getLogger("orchestrator")
 
@@ -105,6 +108,8 @@ class CallOrchestrator:
         filler_delay_seconds: float = DEFAULT_FILLER_DELAY_SECONDS,
         lk_api: api.LiveKitAPI | None = None,
         broker_phone_number: str | None = None,
+        health_monitor: HealthMonitor | None = None,
+        fallback_session_factory: Callable[[], Awaitable[GeminiSessionLike]] | None = None,
     ):
         self._room = room
         self._gemini = gemini_session
@@ -120,6 +125,14 @@ class CallOrchestrator:
         self._broker_phone_number = broker_phone_number
         self._caller_identity: str | None = None
         self._last_lead_snapshot: dict | None = None
+        # PROP-501/502: both None disables the cascaded fallback entirely --
+        # a session error/latency spike just logs and (for errors) re-raises
+        # as before. fallback_session_factory is a zero-arg async callable
+        # (main.py builds one closing over the real API keys) returning an
+        # already-entered CascadedFallbackSession-like object.
+        self._health_monitor = health_monitor
+        self._fallback_session_factory = fallback_session_factory
+        self._fallback_session: object | None = None  # tracked separately so aclose() knows to __aexit__ it
         # None disables predictive barge-in entirely (e.g. lightweight unit
         # tests) -- Gemini's own reactive Interrupted signal still works
         # either way, this only adds the faster local path on top of it.
@@ -218,7 +231,7 @@ class CallOrchestrator:
                     for speech_event in self._vad.process(pcm16_bytes):
                         if speech_event.kind == "speech_started":
                             self._handle_predictive_speech_start()
-                await self._gemini.send_audio(pcm16_bytes)
+                await self._send_audio_with_fallback(pcm16_bytes)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -228,20 +241,59 @@ class CallOrchestrator:
         finally:
             await stream.aclose()
 
-    async def _forward_gemini_audio_to_room(self) -> None:
+    async def _send_audio_with_fallback(self, pcm16_bytes: bytes) -> None:
+        """PROP-502: a send_audio failure (the primary engine's connection
+        dropped) is exactly the kind of error the health monitor should
+        see. If it decides to trigger the cascaded fallback and the switch
+        succeeds, this one chunk is simply dropped -- the next chunk goes
+        to the new self._gemini automatically (looked up fresh each call,
+        not captured in a local variable). If fallback isn't
+        configured/available, re-raises so the caller's broader handler
+        still logs and records it the same way it always has."""
         try:
-            await self._run_forward_gemini_audio_to_room()
+            await self._gemini.send_audio(pcm16_bytes)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.exception("Gemini audio forwarding to room stopped unexpectedly")
-            self._telemetry.record_error("gemini_audio_forwarding", exc)
+        except Exception:
+            if self._health_monitor is not None:
+                self._health_monitor.record_error()
+                if self._health_monitor.should_fallback and await self._switch_to_fallback():
+                    return
             raise
+
+    async def _forward_gemini_audio_to_room(self) -> None:
+        # A supervisor loop, not a single try/except: PROP-502's health
+        # monitor can decide mid-call to switch self._gemini to the
+        # cascaded fallback (_switch_to_fallback), but the `async for` in
+        # _run_forward_gemini_audio_to_room below is bound to whichever
+        # session's receive_events() generator was active when it started
+        # -- reassigning self._gemini doesn't redirect an already-running
+        # iterator. So on a session error that trips the fallback
+        # threshold, this restarts the inner loop fresh against the (by
+        # then already swapped-in) self._gemini instead of just dying.
+        while True:
+            try:
+                await self._run_forward_gemini_audio_to_room()
+                return  # the generator ended on its own -- nothing to restart
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Gemini audio forwarding to room stopped unexpectedly")
+                self._telemetry.record_error("gemini_audio_forwarding", exc)
+                if self._health_monitor is not None:
+                    self._health_monitor.record_error()
+                    if self._health_monitor.should_fallback and await self._switch_to_fallback():
+                        continue
+                raise
 
     async def _run_forward_gemini_audio_to_room(self) -> None:
         async for event in self._gemini.receive_events():
             if isinstance(event, AudioChunk):
-                self._telemetry.record_response_audio()
+                latency_ms = self._telemetry.record_response_audio()
+                if self._health_monitor is not None:
+                    self._health_monitor.record_response_latency(latency_ms)
+                    if self._health_monitor.should_fallback and await self._switch_to_fallback():
+                        return  # this generator is bound to the OLD session -- the supervisor loop restarts against the new one
                 self._agent_speaking = True
                 frame = rtc.AudioFrame(
                     data=event.data,
@@ -410,6 +462,36 @@ class CallOrchestrator:
         )
         await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
 
+    async def _switch_to_fallback(self) -> bool:
+        """PROP-501/502: builds a fresh cascaded fallback session (via the
+        factory main.py supplied) and makes it the active engine. Returns
+        whether the switch actually happened -- callers use this to decide
+        whether to retry/continue or give up and re-raise the original
+        error, so a broken factory (or none configured) degrades to "the
+        call just drops," never to a silent hang."""
+        if self._fallback_session_factory is None:
+            return False
+        if self._fallback_session is not None:
+            return True  # already switched (e.g. both forwarding tasks hit errors around the same time)
+
+        logger.warning("Switching to cascaded fallback session (reason: %s)", self._health_monitor.trigger_reason)
+        try:
+            new_session = await self._fallback_session_factory()
+        except Exception:
+            logger.exception("Failed to build fallback session -- staying on the primary engine")
+            return False
+
+        self._fallback_session = new_session
+        self._gemini = new_session
+        self._health_monitor.reset()
+        log_event(
+            "switched_to_cascaded_fallback",
+            self._room.name,
+            payload={"reason": self._health_monitor.trigger_reason},
+            level="ERROR",
+        )
+        return True
+
     async def aclose(self) -> None:
         for task in self._tasks:
             task.cancel()
@@ -418,6 +500,8 @@ class CallOrchestrator:
             await self._session_store.end_session(call_id=self._room.name)
         if self._tool_client is not None:
             await self._tool_client.aclose()
+        if self._fallback_session is not None:
+            await self._fallback_session.__aexit__(None, None, None)
 
         # Flush any incomplete utterance still sitting in the per-speaker
         # buffers (e.g. the call ended mid-sentence) so it isn't lost.
