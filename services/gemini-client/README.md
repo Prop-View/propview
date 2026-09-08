@@ -72,6 +72,19 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
   always enabled). Per Gemini's own docs, transcription "is independent
   to the model turn" — these can interleave with `AudioChunk` events in
   either order, don't assume strict ordering.
+  **Known gap worth investigating**: in live testing via `../../tests/e2e-voice/`
+  (text-driven turns), `finished` was observed to never actually arrive
+  `True` for any multi-sentence agent reply — every chunk stayed
+  `finished=False` all the way through `TurnComplete` (confirmed by
+  logging every chunk's flag through a full turn, not assumed from one
+  data point). Only confirmed for text-driven (`send_text`) turns so
+  far — real audio-driven turns may behave differently since Gemini's
+  utterance boundaries there are tied to actual speech pacing. Matters
+  because `../orchestrator/orchestrator.py`'s `_record_transcript_chunk`
+  (feeding PROP-506's PII-masked transcript persistence) has this exact
+  same dependency on `finished`, and would silently under-capture
+  mid-call transcript text the same way if real audio turns show the
+  same behavior.
 
 ## Definition of Done (from Sprint Plan)
 
