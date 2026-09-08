@@ -1,0 +1,119 @@
+{
+  "title": "Propview Operations",
+  "uid": "propview-ops",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["propview", "prop-603"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Call Volume (started vs ended, per 5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(propview_calls_started_total[5m])) * 300", "legendFormat": "started" },
+        { "expr": "sum(rate(propview_calls_ended_total[5m])) * 300", "legendFormat": "ended" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Response Latency (TTFA approximation) -- p50 / p95",
+      "description": "Approximates TTFA: last-TurnComplete to next-AudioChunk, not the plan's precisely-defined Timestamp(first audio byte) - Timestamp(user finished speaking). See services/orchestrator/telemetry.py's own scope note.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(propview_response_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(propview_response_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+      ],
+      "thresholds": {
+        "steps": [
+          { "value": null, "color": "green" },
+          { "value": 0.6, "color": "yellow" },
+          { "value": 1.2, "color": "red" }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "title": "Tool Call Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+      "targets": [
+        {
+          "expr": "sum(rate(propview_tool_calls_total{outcome=\"error\"}[5m])) / sum(rate(propview_tool_calls_total[5m]))",
+          "legendFormat": "error rate"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Tool Calls by Tool (rate, per 5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(propview_tool_calls_total[5m])) by (tool_name) * 300", "legendFormat": "{{tool_name}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Interruptions by Source (VAP predictive vs. Gemini reactive)",
+      "description": "Compares services/vap-sidecar/'s predictive barge-in signal against Gemini's own reactive one -- the whole point of PROP-202/203 was for VAP to win this race.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(propview_interruptions_total[5m])) by (source) * 300", "legendFormat": "{{source}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Orchestrator Errors by Source",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(propview_errors_total[5m])) by (source) * 300", "legendFormat": "{{source}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Cascaded Fallback Switches (PROP-501/502)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 },
+      "targets": [{ "expr": "sum(increase(propview_fallback_switches_total[24h]))" }]
+    },
+    {
+      "id": 8,
+      "title": "Human Transfers (PROP-503)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 24 },
+      "targets": [
+        { "expr": "sum(increase(propview_human_transfers_total{outcome=\"success\"}[24h]))", "legendFormat": "success" },
+        { "expr": "sum(increase(propview_human_transfers_total{outcome=\"error\"}[24h]))", "legendFormat": "error" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Call Duration -- p50 / p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(propview_call_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(propview_call_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "CSAT -- not implemented",
+      "description": "The plan's dashboard requirement includes CSAT, but no post-call survey mechanism exists anywhere in this codebase (no SMS survey dispatch, no response capture, no customer_satisfaction_score field in any migration). This panel is a text placeholder, not a query against real data -- see infra/observability/README.md.",
+      "type": "text",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 32 },
+      "options": {
+        "content": "**CSAT is not implemented.** No post-call survey dispatch or response capture exists in this codebase. A real panel here needs: (1) an SMS survey sent after call end, (2) a webhook/endpoint capturing the reply, (3) a `csat_score` column somewhere to query. None of the three exist yet."
+      }
+    }
+  ]
+}

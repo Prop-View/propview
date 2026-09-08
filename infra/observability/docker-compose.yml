@@ -1,0 +1,29 @@
+# PROP-603: Local Prometheus + Grafana stack, pre-provisioned with the
+# datasource and dashboard so `docker compose up` gives a working
+# dashboard against a locally-running orchestrator process
+# (services/orchestrator/main.py, which serves /metrics on :9090 by
+# default -- see METRICS_PORT in its .env.example).
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090" # host 9090 is already the orchestrator's own /metrics port
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SECURITY_ADMIN_PASSWORD=admin # local dev only -- change before any real deployment
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"

@@ -33,6 +33,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Span
 
+from metrics import CALL_DURATION_SECONDS, CALLS_ENDED, CALLS_STARTED, ERRORS, INTERRUPTIONS, RESPONSE_LATENCY_SECONDS
+
 SERVICE_NAME = "core-orchestrator"
 
 _tracer_configured = False
@@ -122,6 +124,7 @@ class CallTelemetry:
         self._span.set_attribute("call_id", self._call_id)
         self._span.set_attribute("room_name", self._room_name)
         log_event("call_started", self._call_id, self._session_id, self._tenant_id)
+        CALLS_STARTED.labels(tenant_id=self._tenant_id).inc()
 
     def record_track_subscribed(self, participant_identity: str) -> None:
         if self._span:
@@ -155,6 +158,8 @@ class CallTelemetry:
         if self._span:
             self._span.add_event("first_response_audio", metrics)
         log_event("first_response_audio", self._call_id, self._session_id, self._tenant_id, metrics=metrics)
+        if latency_ms is not None:
+            RESPONSE_LATENCY_SECONDS.labels(tenant_id=self._tenant_id).observe(latency_ms / 1000)
         return latency_ms
 
     def record_turn_complete(self) -> None:
@@ -171,6 +176,7 @@ class CallTelemetry:
         if self._span:
             self._span.add_event("interrupted", {"source": source})
         log_event("interrupted", self._call_id, self._session_id, self._tenant_id, payload={"source": source})
+        INTERRUPTIONS.labels(tenant_id=self._tenant_id, source=source).inc()
 
     def record_error(self, source: str, error: Exception) -> None:
         if self._span:
@@ -183,6 +189,7 @@ class CallTelemetry:
             payload={"source": source, "error": str(error)},
             level="ERROR",
         )
+        ERRORS.labels(tenant_id=self._tenant_id, source=source).inc()
 
     def end(self) -> None:
         duration_ms = (time.monotonic() - self._call_started_at) * 1000
@@ -192,3 +199,5 @@ class CallTelemetry:
         log_event(
             "call_ended", self._call_id, self._session_id, self._tenant_id, metrics={"call_duration_ms": round(duration_ms, 1)}
         )
+        CALLS_ENDED.labels(tenant_id=self._tenant_id).inc()
+        CALL_DURATION_SECONDS.labels(tenant_id=self._tenant_id).observe(duration_ms / 1000)

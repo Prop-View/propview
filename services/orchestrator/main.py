@@ -33,6 +33,7 @@ from livekit import api, rtc
 
 from gemini_live_client import GeminiLiveSession
 from health_monitor import HealthMonitor
+from metrics import start_metrics_server
 from orchestrator import CallOrchestrator, build_gemini_tools
 from session_store import SessionStore
 from system_prompt import build_system_prompt
@@ -52,6 +53,9 @@ AGENT_IDENTITY = "ai-agent"
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 TENANT_ID = os.environ.get("TENANT_ID", "default")
 ENABLE_PREDICTIVE_BARGE_IN = os.environ.get("ENABLE_PREDICTIVE_BARGE_IN", "true").lower() != "false"
+# PROP-603 -- set to 0 to disable the /metrics endpoint entirely (e.g. running
+# many of these processes locally at once, where each would try to bind the same port).
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "9090"))
 # PROP-503/504 -- unset skips transfer setup entirely (transfer_to_human_agent
 # then replies with a "not available" error rather than failing the call).
 BROKER_PHONE_NUMBER = os.environ.get("BROKER_PHONE_NUMBER")
@@ -163,6 +167,9 @@ def main() -> None:
     load_dotenv()
     if len(sys.argv) != 2:
         sys.exit("Usage: python main.py <room-name>")
+    if METRICS_PORT:
+        start_metrics_server(METRICS_PORT)
+        logger.info("Prometheus metrics available at http://localhost:%d/metrics", METRICS_PORT)
     try:
         asyncio.run(run_call(sys.argv[1]))
     except KeyboardInterrupt:

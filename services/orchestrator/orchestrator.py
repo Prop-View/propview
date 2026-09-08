@@ -31,6 +31,7 @@ from livekit import api, rtc
 
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from human_transfer import transfer_to_broker
+from metrics import FALLBACK_SWITCHES, HUMAN_TRANSFERS, TOOL_CALLS, TOOL_LATENCY_SECONDS
 from pre_transfer_summary import build_pre_transfer_summary
 from session_store import SessionStore
 from telemetry import CallTelemetry, log_event
@@ -137,7 +138,7 @@ class CallOrchestrator:
         # tests) -- Gemini's own reactive Interrupted signal still works
         # either way, this only adds the faster local path on top of it.
         self._vad = vad_detector
-        self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name)
+        self._telemetry = CallTelemetry(call_id=room.name, room_name=room.name, tenant_id=tenant_id)
         self._publish_source: rtc.AudioSource | None = None
         self._tasks: list[asyncio.Task] = []
         self._forwarded_track_sids: set[str] = set()
@@ -412,6 +413,8 @@ class CallOrchestrator:
             payload={"tool_name": call.name, "args": call.args, "error": error},
             level="ERROR" if error else "INFO",
         )
+        TOOL_CALLS.labels(tenant_id=self._tenant_id, tool_name=call.name, outcome="error" if error else "success").inc()
+        TOOL_LATENCY_SECONDS.labels(tenant_id=self._tenant_id, tool_name=call.name).observe(execution_time_ms / 1000)
 
         response = {"error": error} if error else {"result": result}
         await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
@@ -460,6 +463,7 @@ class CallOrchestrator:
             payload={"reason": reason, "error": response.get("error")},
             level="ERROR" if "error" in response else "INFO",
         )
+        HUMAN_TRANSFERS.labels(tenant_id=self._tenant_id, outcome="error" if "error" in response else "success").inc()
         await self._gemini.send_tool_response(call_id=call.id, name=call.name, response=response)
 
     async def _switch_to_fallback(self) -> bool:
@@ -490,6 +494,7 @@ class CallOrchestrator:
             payload={"reason": self._health_monitor.trigger_reason},
             level="ERROR",
         )
+        FALLBACK_SWITCHES.labels(tenant_id=self._tenant_id).inc()
         return True
 
     async def aclose(self) -> None:
