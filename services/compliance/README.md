@@ -97,6 +97,17 @@ fixed by using a non-placeholder number in the test.
 ### Definition of Done — PROP-506 (from Sprint Plan)
 
 - [x] PII masking implemented (regex + Presidio) and tested.
-- [ ] Not yet wired into the actual write path for `interactions.transcript`
-      (no code currently writes call transcripts to that table at all —
-      the orchestrator doesn't build/store a transcript yet).
+- [x] Wired into the actual write path for `interactions.transcript` —
+      `../orchestrator/transcript_store.py` (added after this README was
+      first written): Gemini's speech transcription feeds a per-call
+      buffer, masked via this module and persisted when the call ends.
+      See `../orchestrator/README.md`'s transcript section.
+
+---
+
+## PROP-508: Compliance Rules & Escalation Workflows
+
+See [`COMPLIANCE_AND_ESCALATION.md`](COMPLIANCE_AND_ESCALATION.md) —
+consolidates this filter, PII masking, the multi-region regulatory
+surface (US/India/UAE — what's implemented vs. explicitly not), and the
+human/fallback escalation workflows (PROP-501-504).

@@ -36,3 +36,11 @@ def test_prompt_instructs_bant_tool_use():
 def test_prompt_instructs_transfer_tool_use():
     prompt = build_system_prompt()
     assert "transfer_to_human_agent" in prompt
+
+
+def test_prompt_requires_ai_disclosure():
+    """TCPA requires disclosing automated/AI calling -- see
+    Sprint Plan.md section 6's Multi-Regional Regulatory Landscape."""
+    prompt = build_system_prompt()
+    assert "AI assistant" in prompt
+    assert "first turn" in prompt
