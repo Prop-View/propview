@@ -10,3 +10,4 @@ cryptography>=49.0.0
 google-api-python-client>=2.196.0
 google-auth>=2.52.0
 twilio>=9.11.0
+python-dotenv>=1.0.0

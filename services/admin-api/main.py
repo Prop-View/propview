@@ -10,11 +10,16 @@ import json
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
-from crypto import decrypt, encrypt
-from db import close_pool, get_pool, tenant_connection
+load_dotenv()  # real gap found 2026-09-09: this was never called here --
+# see services/tool-router/main.py's identical fix for the full story.
+
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+from crypto import decrypt, encrypt  # noqa: E402
+from db import close_pool, get_pool, tenant_connection  # noqa: E402
 
 
 class ListingUpload(BaseModel):

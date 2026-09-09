@@ -9,17 +9,27 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ValidationError
+from dotenv import load_dotenv
 
-from db import close_pool, get_pool, tenant_connection
-from redis_client import close_redis_client
-from tools.book_site_visit import BookSiteVisitArgs, book_site_visit
-from tools.check_calendar_slots import CheckCalendarSlotsArgs, check_calendar_slots
-from tools.get_property_details import GetPropertyDetailsArgs, get_property_details
-from tools.search_knowledge_base import SearchKnowledgeBaseArgs, search_knowledge_base
-from tools.search_properties import SearchPropertiesArgs, search_properties
-from tools.update_lead_qualification import UpdateLeadQualificationArgs, update_lead_qualification
+load_dotenv()  # real gap found 2026-09-09: this was never called, so a
+# .env file here was always silently ignored -- every env var (including
+# ones read lazily by imported modules like crypto.py/sms_dispatch.py)
+# had to be exported into the shell by hand instead. Must run before the
+# tools.* imports below, since search_knowledge_base.py reads
+# GEMINI_API_KEY at call time but tools.book_site_visit's own module-level
+# code (sys.path wiring) still runs at import time regardless.
+
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from pydantic import BaseModel, ValidationError  # noqa: E402
+
+from db import close_pool, get_pool, tenant_connection  # noqa: E402
+from redis_client import close_redis_client  # noqa: E402
+from tools.book_site_visit import BookSiteVisitArgs, book_site_visit  # noqa: E402
+from tools.check_calendar_slots import CheckCalendarSlotsArgs, check_calendar_slots  # noqa: E402
+from tools.get_property_details import GetPropertyDetailsArgs, get_property_details  # noqa: E402
+from tools.search_knowledge_base import SearchKnowledgeBaseArgs, search_knowledge_base  # noqa: E402
+from tools.search_properties import SearchPropertiesArgs, search_properties  # noqa: E402
+from tools.update_lead_qualification import UpdateLeadQualificationArgs, update_lead_qualification  # noqa: E402
 
 TOOLS: dict[str, tuple[type[BaseModel], Any]] = {
     "search_properties": (SearchPropertiesArgs, search_properties),
