@@ -53,12 +53,33 @@ VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 
 echo
 echo "== Installing dependencies (every service's requirements.txt) =="
-"$VENV_PIP" install -q --upgrade pip
+# --retries 10 (pip's default is 5): seen this environment's DNS
+# intermittently fail to resolve files.pythonhosted.org specifically
+# (the wheel-download CDN) while pypi.org itself resolves fine -- real,
+# reproduced twice, documented in scripts/README.md. Doesn't hurt a
+# healthy network, gives a flaky one more chances.
+"$VENV_PIP" install -q --retries 10 --upgrade pip
+
+install_with_retry() {
+    local req_file="$1"
+    local attempt
+    for attempt in 1 2 3; do
+        if "$VENV_PIP" install -q --retries 10 -r "$req_file"; then
+            return 0
+        fi
+        echo "  attempt $attempt failed for ${req_file#"$REPO_ROOT"/}, retrying in 5s..." >&2
+        sleep 5
+    done
+    echo "  giving up on ${req_file#"$REPO_ROOT"/} after 3 attempts -- see scripts/README.md's" >&2
+    echo "  'pip install' verification note if this is a files.pythonhosted.org DNS issue." >&2
+    return 1
+}
+
 # find, not a hardcoded list -- so a new service's requirements.txt gets
 # picked up automatically without this script needing an update.
 while IFS= read -r req_file; do
     echo "  installing: ${req_file#"$REPO_ROOT"/}"
-    "$VENV_PIP" install -q -r "$req_file"
+    install_with_retry "$req_file"
 done < <(find "$REPO_ROOT" -name "requirements.txt" -not -path "*/.venv/*" | sort)
 
 echo

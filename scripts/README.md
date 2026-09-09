@@ -42,13 +42,25 @@ Safe to re-run — every step is idempotent (won't overwrite an existing
   Gemini API call (which then hit the same network outage noted below,
   confirming the `.env` loading itself, not the network call, was what
   needed proving).
-- **`pip install -r requirements.txt` for all 13 services**: every
-  individual package in every `requirements.txt` in this repo was
-  installed and used successfully earlier in this codebase's
-  development — but a single clean end-to-end run of this script's
-  install step specifically hit a network outage in the verification
-  environment at the time (DNS resolution failing repeatedly, not a
-  script bug — confirmed by `curl`/`nslookup` failing the same way
-  independent of this script). Re-run `./scripts/setup_dev_env.sh` to
-  complete that install once you have working network — the script
-  itself is unchanged from what got this far successfully.
+- **`pip install -r requirements.txt` for all 13 services, from a
+  completely empty `.venv`**: **verified, full success**, 2026-09-09.
+  Two earlier attempts hit a real, reproducible issue first —
+  `files.pythonhosted.org` (the wheel-download CDN) intermittently
+  failing DNS resolution in the verification sandbox while `pypi.org`
+  itself resolved fine — which is why the script retries each
+  `requirements.txt` install up to 3 times with a 5s pause (on top of
+  pip's own `--retries 10` per attempt). The third attempt, with that
+  retry logic in place, ran clean end to end: every one of the 13
+  `requirements.txt` files installed (hitting and recovering from that
+  same DNS flakiness once, on `services/scheduling`'s), the spaCy model
+  downloaded, and all 5 `.env` files were generated correctly.
+- **The resulting venv actually works**: ran
+  `services/orchestrator/tests/` (38 tests, no mocked externals skipped)
+  through `.venv/bin/python` directly — all 38 passed. Then ran
+  `test_orchestrator_live.py` (real LiveKit server, real Redis, real
+  Gemini API key, entirely through this fresh venv, no dependency on any
+  Python environment set up any other way) — **PASS**: real participants
+  joined a real room, real audio round-tripped through the resampling
+  pipeline, session cleanup was verified correct. This is as close to
+  "clone the repo, run one script, it works" as this environment could
+  prove.
