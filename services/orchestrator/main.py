@@ -31,6 +31,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"
 from dotenv import load_dotenv
 from livekit import api, rtc
 
+from conversation_context import ConversationContextStore
 from gemini_live_client import GeminiLiveSession
 from health_monitor import HealthMonitor
 from metrics import start_metrics_server
@@ -121,6 +122,7 @@ async def run_call(room_name: str) -> None:
     logger.info("Agent joined room %r", room_name)
 
     session_store = SessionStore(redis_url=REDIS_URL)
+    conversation_context = ConversationContextStore(redis_url=REDIS_URL)
     tool_client = ToolRouterClient(base_url=TOOL_ROUTER_URL, tenant_id=TENANT_ID)
     remote_tools = await tool_client.fetch_gemini_tools()
     gemini_tools = build_gemini_tools(remote_tools)
@@ -147,6 +149,7 @@ async def run_call(room_name: str) -> None:
             broker_phone_number=BROKER_PHONE_NUMBER,
             health_monitor=health_monitor,
             fallback_session_factory=fallback_session_factory,
+            conversation_context=conversation_context,
         )
         await orchestrator.start()
         logger.info("Orchestrator running -- waiting for the call to end (Ctrl+C to stop)")
@@ -156,6 +159,7 @@ async def run_call(room_name: str) -> None:
         finally:
             await orchestrator.aclose()
             await session_store.aclose()
+            await conversation_context.aclose()
             if lk_api is not None:
                 await lk_api.aclose()
             if room.isconnected():

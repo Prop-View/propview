@@ -307,12 +307,28 @@ result.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
 - [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).
-- [ ] Word-level transcript truncation at the exact millisecond of
-      interruption (the plan's literal PROP-204 wording) — Gemini's
-      `output_transcription` streams in text chunks, not per-word
-      timestamps, so the current implementation truncates at
-      utterance/chunk granularity instead. Noted as a known gap, not
-      silently approximated.
+- [x] PROP-204: barge-in truncates the interrupted speaker's transcript at
+      chunk granularity (`_flush_transcript_buffer`, called from both the
+      VAP predictive and Gemini reactive interrupt paths) and pushes it to
+      a live Redis conversation-context window (`conversation_context.py`,
+      new — distinct from `session_store.py`'s call_id→room mapping and
+      `transcript_store.py`'s end-of-call Postgres persistence). Resetting
+      the buffer on flush, not just appending, also closes a real bug a
+      live stress run caught: without the reset, transcript chunks arriving
+      after an interruption (Gemini's transcription stream runs
+      "independent to the model turn," so this can happen) silently bled
+      onto whatever the agent said next. **Live-verified** 2026-09-09
+      (`tests/test_transcript_truncation_live.py`) against a real LiveKit
+      call and real Redis: a fake Gemini streamed real `TranscriptChunk`
+      deltas mid-utterance, a real caller speech recording triggered a
+      predictive barge-in, and the truncated line landed correctly in both
+      `_transcript_lines` and the real Redis store.
+      Word-level truncation at the exact millisecond of interruption (the
+      plan's literal wording) isn't achievable from this SDK's surface —
+      Gemini's `output_transcription` streams text in chunks, not
+      per-word timestamps (same honest-scope note `telemetry.py` already
+      makes about TTFA) — so chunk granularity is what's actually
+      implemented. Noted as a known limitation, not silently approximated.
 - [ ] AEC3 (PROP-201): not implemented. This architecture never actually
       needs it — the caller is a SIP/PSTN participant and the agent is a
       separate LiveKit participant publishing its own track, so there's no

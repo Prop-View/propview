@@ -29,6 +29,7 @@ from typing import Awaitable, Callable, Protocol
 from google.genai import types as genai_types
 from livekit import api, rtc
 
+from conversation_context import ConversationContextStore
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from human_transfer import transfer_to_broker
 from metrics import FALLBACK_SWITCHES, HUMAN_TRANSFERS, TOOL_CALLS, TOOL_LATENCY_SECONDS
@@ -111,10 +112,17 @@ class CallOrchestrator:
         broker_phone_number: str | None = None,
         health_monitor: HealthMonitor | None = None,
         fallback_session_factory: Callable[[], Awaitable[GeminiSessionLike]] | None = None,
+        conversation_context: ConversationContextStore | None = None,
     ):
         self._room = room
         self._gemini = gemini_session
         self._session_store = session_store
+        # PROP-204: None disables the live Redis context window entirely --
+        # the in-memory _transcript_lines/_transcript_buffer below (and the
+        # end-of-call Postgres persistence via transcript_store.py) work the
+        # same either way, this only adds the mid-call, externally-readable
+        # copy the plan's DoD names ("Redis context window").
+        self._conversation_context = conversation_context
         self._tool_client = tool_client
         self._database_url = database_url
         self._tenant_id = tenant_id
@@ -335,6 +343,7 @@ class CallOrchestrator:
                 self._telemetry.record_interrupted(source="gemini")
                 self._agent_speaking = False
                 self._publish_source.clear_queue()
+                self._flush_transcript_buffer("agent", interrupted=True)
                 if self._active_filler is not None:
                     self._tasks.append(asyncio.create_task(self._active_filler.stop()))
             elif isinstance(event, ToolCallRequest):
@@ -355,6 +364,7 @@ class CallOrchestrator:
         self._telemetry.record_interrupted(source="vap_predictive")
         self._agent_speaking = False
         self._publish_source.clear_queue()
+        self._flush_transcript_buffer("agent", interrupted=True)
         if self._active_filler is not None:
             # A barge-in during PROP-305 filler audio: clear_queue() alone
             # only drops frames already handed to LiveKit -- the filler's
@@ -371,9 +381,42 @@ class CallOrchestrator:
         # that utterance complete.
         self._transcript_buffer[chunk.speaker] += chunk.text
         if chunk.finished:
-            label = "Caller" if chunk.speaker == "caller" else "Agent"
-            self._transcript_lines.append(f"{label}: {self._transcript_buffer[chunk.speaker]}")
-            self._transcript_buffer[chunk.speaker] = ""
+            self._flush_transcript_buffer(chunk.speaker)
+
+    def _flush_transcript_buffer(self, speaker: str, interrupted: bool = False) -> None:
+        """PROP-204: flush whatever's accumulated in one speaker's
+        in-progress chunk buffer as one labeled line, and reset the buffer.
+
+        Called both from the normal path (chunk.finished) and from both
+        barge-in signals (interrupted=True) -- on a barge-in, whatever
+        agent text had streamed in by that instant is the accurate
+        chunk-granularity truncation (see conversation_context.py's
+        docstring for why word-exact isn't achievable here). Resetting the
+        buffer here, not just appending, is what stops a since-abandoned
+        turn's later chunks (if Gemini's independent transcription stream
+        keeps emitting any) from silently bleeding into whatever the agent
+        says next.
+
+        A no-op if the buffer is already empty -- safe to call from both
+        interruption signals for the same barge-in (VAP predictive firing
+        first, then Gemini's reactive Interrupted arriving after its own
+        round trip) without double-flushing.
+        """
+        text = self._transcript_buffer[speaker]
+        if not text:
+            return
+        label = "Caller" if speaker == "caller" else "Agent"
+        suffix = " (interrupted)" if interrupted else ""
+        self._transcript_lines.append(f"{label}: {text}{suffix}")
+        self._transcript_buffer[speaker] = ""
+        if self._conversation_context is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._conversation_context.append_line(
+                        self._room.name, speaker, text, interrupted=interrupted
+                    )
+                )
+            )
 
     async def _handle_tool_call(self, call: ToolCallRequest) -> None:
         if call.name == "transfer_to_human_agent":
@@ -515,22 +558,27 @@ class CallOrchestrator:
         return True
 
     async def aclose(self) -> None:
-        for task in self._tasks:
+        # Flush any incomplete utterance still sitting in the per-speaker
+        # buffers (e.g. the call ended mid-sentence) so it isn't lost. Done
+        # before the cancel loop below, but tracked separately: this can
+        # itself append a new conversation-context task to self._tasks, and
+        # that one must be *awaited*, not cancelled -- cancelling a task
+        # this soon after asyncio.create_task() would kill it before it's
+        # had a chance to actually run.
+        pre_flush_task_count = len(self._tasks)
+        for speaker in list(self._transcript_buffer):
+            self._flush_transcript_buffer(speaker)
+        in_flight_tasks, flush_tasks = self._tasks[:pre_flush_task_count], self._tasks[pre_flush_task_count:]
+
+        for task in in_flight_tasks:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*in_flight_tasks, *flush_tasks, return_exceptions=True)
         if self._session_store is not None:
             await self._session_store.end_session(call_id=self._room.name)
         if self._tool_client is not None:
             await self._tool_client.aclose()
         if self._fallback_session is not None:
             await self._fallback_session.__aexit__(None, None, None)
-
-        # Flush any incomplete utterance still sitting in the per-speaker
-        # buffers (e.g. the call ended mid-sentence) so it isn't lost.
-        for speaker, text in self._transcript_buffer.items():
-            if text:
-                label = "Caller" if speaker == "caller" else "Agent"
-                self._transcript_lines.append(f"{label}: {text}")
 
         if self._database_url is not None and self._transcript_lines:
             duration_seconds = int(time.monotonic() - self._call_started_at)

@@ -1,0 +1,8 @@
+{
+  // This project is PostgreSQL-only (asyncpg, pgvector, RLS). The ms-mssql
+  // extension's T-SQL error-checker misparses valid PostgreSQL/PL-pgSQL
+  // syntax ($$-quoted DO blocks, FOREACH...LOOP, EXECUTE format(), %I) as
+  // invalid, hence the red underlines. Disabling its error-checking here
+  // (syntax highlighting is unaffected).
+  "mssql.intelliSense.enableErrorChecking": false
+}
