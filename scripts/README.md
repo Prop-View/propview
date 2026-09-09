@@ -64,3 +64,18 @@ Safe to re-run — every step is idempotent (won't overwrite an existing
   pipeline, session cleanup was verified correct. This is as close to
   "clone the repo, run one script, it works" as this environment could
   prove.
+- **A real, second bug this whole exercise caught**: running every
+  *other* service's test suite through this same fresh venv turned up
+  one more gap -- `services/vap-sidecar/tests/` failed with
+  `ModuleNotFoundError: No module named 'onnxruntime'`. `silero-vad`'s
+  `onnx=True` mode needs `onnxruntime` at runtime, but neither
+  `vap-sidecar/requirements.txt` nor `orchestrator/requirements.txt`
+  (which also imports `vap_processor.py`) ever declared it -- it only
+  ever worked before because *something else* had already pulled it into
+  the shared global Python environment every earlier test run in this
+  codebase's history used. A genuinely empty venv doesn't have that
+  accident to lean on, which is exactly what caught this. Added
+  `onnxruntime>=1.20.0` to both `requirements.txt` files; reran both the
+  unit tests (4/4) and the real-LiveKit predictive-barge-in live test
+  through the fresh venv afterward to confirm the fix, not just that the
+  import succeeds in isolation.
