@@ -88,13 +88,18 @@ unauthenticated caller could brute-force `tenant_id` values or hammer
 Same recommendation as §3 — solve auth first, rate limiting is a smaller
 follow-up once there's an identity to rate-limit *by*.
 
-## 5. TLS (PROP-108) — not implemented
+## 5. TLS (PROP-108) — config built, not yet deployed against a real cert
 
-Tracked separately (Sprint 1's PROP-108, still To Do) — LiveKit's own
-WebRTC transport encrypts media by default (DTLS-SRTP), but the plan's
-explicit "TLS on WebSockets and WebRTC channels" verification step
-hasn't been done. Not re-audited here since it's an existing, already-
-tracked gap, not a new finding.
+LiveKit's own WebRTC transport encrypts media by default (DTLS-SRTP) --
+that part needed no work. The signaling WebSocket itself was plain
+`ws://` with nothing in front of it; `../livekit/Caddyfile` +
+`docker-compose.yml`'s new `caddy` service now TLS-terminate it
+(automatic Let's Encrypt cert/renewal), and
+`../gcp/provision_vm.sh` opens the firewall ports (80/443) it needs. See
+`../livekit/README.md`'s "TLS (PROP-108)" section for the full picture.
+Not yet exercised against a real cert/domain -- that needs an actual
+deployed VM with a real domain pointed at it, the same category of gap
+as PROP-101/102 themselves, not a new finding from this audit.
 
 ## 6. Encryption at rest — implemented correctly
 

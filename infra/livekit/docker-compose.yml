@@ -1,9 +1,10 @@
 version: "3.9"
 
 # PROP-102: LiveKit Media Server + SIP Gateway on a single cloud VM.
-# Two services: the WebRTC media server (livekit-server) and the SIP
+# Three services: the WebRTC media server (livekit-server), the SIP
 # bridge (livekit-sip) that terminates the Twilio trunk from PROP-101
-# and creates a LiveKit room per inbound call.
+# and creates a LiveKit room per inbound call, and Caddy (PROP-108),
+# which TLS-terminates the signaling WebSocket -- see ./Caddyfile.
 
 services:
   livekit-server:
@@ -23,3 +24,20 @@ services:
     volumes:
       - ./sip-config.yaml:/etc/sipconfig.yaml:ro
     command: --config /etc/sipconfig.yaml
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - livekit-server
+    environment:
+      - LIVEKIT_DOMAIN=${LIVEKIT_DOMAIN:?set LIVEKIT_DOMAIN in .env -- see ./Caddyfile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

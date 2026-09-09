@@ -60,6 +60,13 @@ gcloud compute firewall-rules create "${FIREWALL_TAG}-rtc-udp" \
   --description "LiveKit RTC media (PROP-102)" \
   || echo "  (already exists)"
 
+gcloud compute firewall-rules create "${FIREWALL_TAG}-tls" \
+  --project "$GCP_PROJECT_ID" \
+  --allow tcp:80,tcp:443 \
+  --target-tags "$FIREWALL_TAG" \
+  --description "Caddy TLS termination for LiveKit signaling (PROP-108) -- 80 is ACME HTTP-01 challenge + redirect, 443 is wss://" \
+  || echo "  (already exists)"
+
 if [ -z "$SIP_SOURCE_RANGES" ]; then
   echo "WARNING: SIP_SOURCE_RANGES is not set -- the SIP/RTP firewall rule" >&2
   echo "  below will allow traffic from 0.0.0.0/0 (any IP on the internet)." >&2

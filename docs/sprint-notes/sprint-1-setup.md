@@ -70,7 +70,11 @@ Every component that doesn't strictly need a paid account has a
 - `main.py` takes an explicit room name — it doesn't yet auto-dispatch
   onto every new inbound SIP call (needs LiveKit's Agent Worker /
   job-dispatch system once PROP-102 is deployed and real calls exist).
-- TLS (PROP-108) is blocked on PROP-102's VM existing.
+- TLS (PROP-108): Caddy config now built (`infra/livekit/Caddyfile`,
+  `docker-compose.yml`, `infra/gcp/provision_vm.sh`'s firewall rule) —
+  see `infra/livekit/README.md`. Actually issuing a cert still needs a
+  real domain pointed at a real deployed VM, so it remains unverified
+  until PROP-102 is actually deployed.
 - Barge-in (`Interrupted` events) only fires from Gemini's own
   server-side detection for now — real VAD-driven buffer clearing is
   PROP-203/204 (Sprint 2).

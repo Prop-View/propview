@@ -1,0 +1,20 @@
+# PROP-108: TLS termination for the LiveKit signaling WebSocket.
+#
+# LiveKit's WebRTC media transport is already encrypted by default
+# (DTLS-SRTP, inherent to the protocol -- see ../observability/SECURITY_AUDIT.md
+# section 5) regardless of this file. What's NOT encrypted without this:
+# the signaling WebSocket itself, which livekit-server serves as plain
+# ws:// on :7880 (see docker-compose.yml). Caddy terminates real TLS here
+# (automatic Let's Encrypt cert + renewal, zero extra config) and proxies
+# to that same port, turning ws://<vm-ip>:7880 into wss://<domain>:443 --
+# Caddy's reverse_proxy handles WebSocket upgrades transparently, no
+# special directive needed.
+#
+# Requires a real domain name with a DNS A record pointing at the VM's
+# static IP (reserved by ../gcp/provision_vm.sh) -- the one piece of this
+# that can't be built or tested without an actual deployed VM. Once that
+# DNS record exists, set LIVEKIT_DOMAIN and this Just Works.
+
+{$LIVEKIT_DOMAIN} {
+	reverse_proxy localhost:7880
+}
