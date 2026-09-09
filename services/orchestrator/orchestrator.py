@@ -250,17 +250,34 @@ class CallOrchestrator:
         to the new self._gemini automatically (looked up fresh each call,
         not captured in a local variable). If fallback isn't
         configured/available, re-raises so the caller's broader handler
-        still logs and records it the same way it always has."""
+        still logs and records it the same way it always has (crash-loud,
+        matching pre-PROP-502 behavior with nothing to fall back to).
+
+        A real bug PROP-40's live stress test caught: this used to
+        re-raise whenever the switch didn't happen yet (below the health
+        monitor's consecutive-errors threshold) too. That exception
+        propagates out of _forward_caller_audio_to_gemini's `async for`
+        loop entirely, killing that task for the rest of the call -- so a
+        single transient failure, below the threshold, permanently
+        silenced the caller before a second error ever had the chance to
+        accumulate and actually trigger the fallback it was configured
+        for. Now: when a health monitor IS configured, a sub-threshold
+        error just drops this one chunk and lets the loop keep running --
+        a genuinely dead connection keeps failing on the next chunks too
+        and reaches the threshold; a transient blip loses one 20ms frame
+        instead of the rest of the call."""
         try:
             await self._gemini.send_audio(pcm16_bytes)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            if self._health_monitor is not None:
-                self._health_monitor.record_error()
-                if self._health_monitor.should_fallback and await self._switch_to_fallback():
-                    return
-            raise
+        except Exception as exc:
+            if self._health_monitor is None:
+                raise
+            logger.exception("send_audio failed")
+            self._telemetry.record_error("caller_audio_forwarding", exc)
+            self._health_monitor.record_error()
+            if self._health_monitor.should_fallback:
+                await self._switch_to_fallback()
 
     async def _forward_gemini_audio_to_room(self) -> None:
         # A supervisor loop, not a single try/except: PROP-502's health

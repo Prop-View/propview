@@ -139,14 +139,33 @@ async def test_send_audio_with_fallback_switches_on_send_failure(orchestrator_wi
     orch, health_monitor, fallback_session, factory = orchestrator_with_monitor
     orch._gemini.send_audio = AsyncMock(side_effect=[RuntimeError("connection dropped"), RuntimeError("again")])
 
-    # First failure: only 1 consecutive error, threshold is 2 -- must re-raise, not switch yet.
-    with pytest.raises(RuntimeError):
-        await orch._send_audio_with_fallback(b"\x00\x01")
+    # First failure: only 1 consecutive error, threshold is 2 -- recorded, but
+    # must NOT re-raise (a real bug PROP-40's live stress test caught: doing
+    # so used to kill the entire caller-audio-forwarding task on the very
+    # first sub-threshold error, permanently silencing the caller before a
+    # second error ever got the chance to accumulate and trigger the switch
+    # it was configured for). The chunk is just dropped and the loop
+    # (represented here by the caller trying again below) keeps going.
+    await orch._send_audio_with_fallback(b"\x00\x01")
     factory.assert_not_called()
+    assert orch._gemini is not fallback_session
 
     # Second failure: hits the threshold -- must switch and swallow the error.
     await orch._send_audio_with_fallback(b"\x00\x01")
     assert orch._gemini is fallback_session
+
+
+@pytest.mark.asyncio
+async def test_send_audio_with_fallback_reraises_when_no_health_monitor_configured():
+    room = FakeRoom()
+    gemini = MagicMock()
+    gemini.send_audio = AsyncMock(side_effect=RuntimeError("connection dropped"))
+    orch = CallOrchestrator(room=room, gemini_session=gemini, health_monitor=None, fallback_session_factory=None)
+
+    # No fallback configured at all -- preserve the original crash-loud
+    # behavior (nothing to degrade to, so surfacing the error is correct).
+    with pytest.raises(RuntimeError):
+        await orch._send_audio_with_fallback(b"\x00\x01")
 
 
 @pytest.mark.asyncio

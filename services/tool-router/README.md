@@ -168,9 +168,17 @@ double-booked.
       the live test above confirms tool results actually land in Gemini's
       conversation context (the spoken response correctly referenced the
       returned listings' price and address). The "latency" half of
-      PROP-306 is still open (see below).
-- [ ] Latency budget (plan: <900ms including DB query, or filler speech
-      within 300ms) not yet measured under load.
+      PROP-306 is now measured too (see below).
+- [x] Latency budget (plan: <900ms including DB query, or filler speech
+      within 300ms) — now measured live, see
+      `../../tests/integration/README.md` (`latency_benchmark.py`). The
+      Tool Router itself is well within budget (p95=45ms round trip,
+      against a 350ms DB-timeout mitigation target); the full
+      question-to-spoken-answer turn through real Gemini exceeds the raw
+      900ms target at p95 (5363ms) — that gap is Gemini's own
+      tool-calling latency, not this service, and is the reason
+      PROP-305's filler speech exists as the plan's own mitigation for
+      it.
 - [x] BANT qualification state extraction (PROP-402) as a Gemini tool call
       — see dedicated section above. Verified against real Postgres; not
       yet live-verified against a real Gemini call (unlike

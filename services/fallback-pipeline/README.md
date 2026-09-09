@@ -110,6 +110,58 @@ forwarding tasks can hit errors around the same time), a failed factory
 declines and stays on the primary engine, and `aclose()` correctly exits
 the fallback session if one was created.
 
+## PROP-40 / PROP-507: live stress test under an active call
+
+`tests/test_fallback_stress_live.py` doesn't need real Deepgram/OpenAI/
+Cartesia credentials — it stresses the *switch mechanism* itself
+(`orchestrator.py`'s health monitor + `_switch_to_fallback()`) under a
+real LiveKit room with real audio flowing, using fakes that still
+produce real `AudioChunk` events at the right sample rate. Two phases:
+a flaky primary (fails every 4th `send_audio` call) forces the switch,
+then the fallback session itself starts failing too (`fail_after=30`) to
+see what happens when there's nowhere left to fall back to.
+
+```bash
+livekit-server --dev &
+cd services/fallback-pipeline
+python tests/test_fallback_stress_live.py
+```
+
+**Run 2026-09-09 — a real bug found and fixed, then PASS.** The first
+run failed: the primary's first error (below the health monitor's
+2-consecutive-error threshold) was re-raised out of
+`_send_audio_with_fallback`, which propagated out of
+`orchestrator.py`'s `_forward_caller_audio_to_gemini`'s `async for` loop
+entirely — killing that task for the rest of the call. The caller went
+permanently silent (from Gemini's perspective) after a single transient
+failure, before a second error ever had the chance to accumulate and
+actually trigger the fallback it was configured for
+(`primary.send_audio_calls == 4`, then nothing — the task was dead).
+Fixed in `../orchestrator/orchestrator.py`'s `_send_audio_with_fallback`:
+when a health monitor is configured, a sub-threshold error now drops
+just that one audio chunk and lets the forwarding loop keep running,
+instead of re-raising and killing the loop. Rerun after the fix: the
+switch correctly triggered at the 2nd consecutive error
+(`Primary session: 8 send_audio calls, 2 failures`, `Switch happened:
+True (at ~0.08s)`), and the caller kept receiving real audio frames
+throughout (`630` frames) — **RESULT: PASS**.
+
+**A second, real gap the same run surfaced (not fixed — documented):**
+once switched, `_switch_to_fallback()` returns `True` unconditionally
+(`self._fallback_session is not None`) without doing anything further.
+So when the *fallback* session itself later started failing too
+(`fail_after=30` in the test), those errors got recorded and
+re-triggered `should_fallback`, but the resulting `_switch_to_fallback()`
+call was a no-op — confirmed live: `Fallback session: 622 send_audio
+calls, 592 failures`, and `Health monitor still shows
+should_fallback=True (stuck, never resets after the fallback's own
+failures): True` at the end of the run. There is no tertiary fallback
+and no "give up and end the call" path — a fallback-session failure is
+currently silently absorbed with no visible recovery action beyond the
+`ERROR` metric/log already emitted per failed chunk. Out of scope to fix
+here (it needs a designed tertiary/give-up policy, not a one-line
+change); left as a known gap for a future ticket.
+
 ## Definition of Done (from Sprint Plan)
 
 - [x] Cascaded fallback pipeline (Deepgram + GPT-4o-mini + Cartesia),
@@ -117,6 +169,11 @@ the fallback session if one was created.
 - [x] Health monitor auto-switching on latency >1200ms or session drops.
 - [x] AI degradation mode (tools disabled during fallback) — architecture
       reference's layer D.
-- [ ] Live-verified against a real call with real API keys — see above.
-- [ ] PROP-507 (stress testing fallback switches during active calls) —
-      not built; needs the above live verification first.
+- [ ] Live-verified against a real call with real API keys — Deepgram/
+      OpenAI/Cartesia's own STT/LLM/TTS behavior still isn't; see
+      "Verification" above.
+- [x] PROP-507 (stress testing fallback switches during active calls) —
+      built and live-verified above; caught and fixed a real bug (primary
+      transient errors killing the forwarding task before the fallback
+      could trigger). One further gap (no tertiary fallback once the
+      fallback session also fails) found and documented, not fixed.
