@@ -5,6 +5,8 @@ re-run.
 
 Usage:
     DATABASE_URL=postgresql://localhost/propview_dev python apply_migrations.py
+    # or: cp .env.example .env (fill in DATABASE_URL if the default's wrong), then just:
+    python apply_migrations.py
 """
 
 import os
@@ -12,11 +14,13 @@ import sys
 from pathlib import Path
 
 import psycopg
+from dotenv import load_dotenv
 
 MIGRATIONS_DIR = Path(__file__).parent
 
 
 def main() -> None:
+    load_dotenv()
     database_url = os.environ.get("DATABASE_URL", "postgresql://localhost/propview_dev")
     conn = psycopg.connect(database_url, autocommit=True)
 

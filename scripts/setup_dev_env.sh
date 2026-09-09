@@ -104,9 +104,9 @@ setup_env_file() {
     echo "  created $env_file"
 }
 
-for svc in orchestrator tool-router admin-api; do
-    if [ -f "services/$svc/.env.example" ]; then
-        setup_env_file "services/$svc"
+for svc in services/orchestrator services/tool-router services/admin-api db/migrations db/ingestion; do
+    if [ -f "$svc/.env.example" ]; then
+        setup_env_file "$svc"
     fi
 done
 

@@ -18,10 +18,13 @@ import os
 from pathlib import Path
 
 import asyncpg
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pgvector.asyncpg import register_vector
 from pypdf import PdfReader
+
+load_dotenv()
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIMENSIONS = 768

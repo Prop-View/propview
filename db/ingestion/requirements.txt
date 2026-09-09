@@ -4,3 +4,4 @@ pgvector>=0.5.0
 pypdf>=5.0.0
 pytest>=8.0.0
 pytest-asyncio>=1.4.0
+python-dotenv>=1.0.0

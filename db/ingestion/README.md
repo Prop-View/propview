@@ -13,7 +13,9 @@ pip install -r requirements.txt
 Needs `GEMINI_API_KEY` (same key as `services/gemini-client/`) and
 `DATABASE_URL` pointed at the `propview_app` role — RLS (PROP-601) means
 inserts fail without the right tenant context set, which this script
-handles itself.
+handles itself. `cp .env.example .env` and fill it in (or run
+`../../scripts/setup_dev_env.sh` for the whole repo at once) instead of
+exporting these by hand every time.
 
 ## Usage
 

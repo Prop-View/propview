@@ -16,7 +16,12 @@ createdb propview_dev
 
 pip install -r requirements.txt
 DATABASE_URL=postgresql://localhost/propview_dev python apply_migrations.py
+# or: cp .env.example .env (edit DATABASE_URL if the default's wrong), then just:
+python apply_migrations.py
 ```
+
+(`../../scripts/setup_dev_env.sh` does the venv + `.env` setup for the
+whole repo in one step, if you haven't already.)
 
 Run `apply_migrations.py` as the cluster superuser (default local setup) —
 `000_create_app_role.sql` needs superuser privileges to create the
