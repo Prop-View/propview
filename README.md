@@ -4,6 +4,8 @@ Enterprise-grade, low-latency, full-duplex Voice AI agent for inbound real
 estate calls: qualifies leads, queries live MLS/property data, books site
 visits, and escalates to a human broker when needed.
 
+- **Guide**: `docs/GUIDE.md` — where every API key goes, how to use the
+  product, and how the codebase is put together. Start here.
 - **Plan**: `Sprint Plan.md` — 6 sprints, 49 engineering tasks (PROP-101–608)
 - **Architecture**: `docs/architecture.md` — supersedes the plan text where they differ
 - **Tracking**: Jira project `PROP` (dspacejira) — task mapping in project memory
@@ -17,8 +19,8 @@ source .venv/bin/activate
 cd services/orchestrator && python tests/test_orchestrator_live.py   # proves the core loop works, no API keys/mic/phone needed
 ```
 
-Then `docs/AGENCY_ONBOARDING.md` for onboarding a tenant, or any
-service's own README for what it does.
+Then `docs/GUIDE.md` for API key placement, onboarding a tenant, and
+running a real call, or any service's own README for what it does.
 
 ## Layout
 
