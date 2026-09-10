@@ -34,15 +34,31 @@ cd ../admin-api && uvicorn main:app --port 8001 &
 
 Every table in `db/migrations/003_crm_schema.sql`/`001_projects_and_properties.sql`
 is scoped by a plain `tenant_id` text column, enforced by RLS
-(`004_row_level_security.sql`). There's no tenant-registration endpoint —
-a tenant "exists" the moment any row references its `tenant_id` for the
-first time. Pick a short, stable slug (e.g. `austin-realty`); it's used
-in every API call below.
+(`004_row_level_security.sql`). Pick a short, stable slug (e.g.
+`austin-realty`); it's used in every API call below.
 
-### 1b. Import listings
+### 1b. Provision the tenant's admin API key
+
+```bash
+curl -X POST localhost:8001/admin/tenants/austin-realty/provision \
+  -H "Authorization: Bearer $PLATFORM_OPERATOR_TOKEN"
+# -> {"tenant_id": "austin-realty", "admin_api_key": "<save this now>"}
+```
+
+`$PLATFORM_OPERATOR_TOKEN` is `services/admin-api/.env`'s value — held
+only by whoever operates this platform, not given to the agency. The
+returned `admin_api_key` is shown exactly once (only its hash is stored);
+every other admin-api call for this tenant needs it as
+`Authorization: Bearer <admin_api_key>`. Losing it means re-provisioning
+(which invalidates the old one), not recovering it — see
+`services/admin-api/README.md`'s "Auth" section for the full design and
+why this is per-tenant rather than one shared secret.
+
+### 1c. Import listings
 
 ```bash
 curl -X POST localhost:8001/admin/tenants/austin-realty/listings \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"listings": [{"address": "123 Oak St", "city": "Austin", "state": "TX",
        "property_type": "house", "beds": 3, "baths": 2.0, "price": 520000}]}'
@@ -62,6 +78,7 @@ answerable via `search_knowledge_base`, see `db/ingestion/README.md`
 
 ```bash
 curl -X PUT localhost:8001/admin/tenants/austin-realty/calendar-credentials \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"provider": "google", "credentials": {"refresh_token": "...", "client_id": "...", "client_secret": "..."}}'
 ```
@@ -73,13 +90,20 @@ a real Google account in this codebase's development so far).
 
 ### 2b. Agency branding
 
-`AGENCY_NAME` is currently a **process-level env var**
-(`services/orchestrator/.env.example`), not a per-tenant database value —
-a real multi-tenant deployment running one shared orchestrator process
-pool would need this promoted into `tenant_settings` (alongside
-calendar credentials) so it varies per call by `tenant_id` rather than
-per deployment. Not built; today, one orchestrator deployment serves
-callers under one agency name.
+```bash
+curl -X PUT localhost:8001/admin/tenants/austin-realty/branding \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"agency_name": "Austin Realty"}'
+```
+
+Stored in `tenant_settings.agency_name` — `services/orchestrator/main.py`
+looks this up per call (`tenant_branding.get_agency_name`) before
+building the system prompt, falling back to the `AGENCY_NAME` env var
+(`services/orchestrator/.env.example`) only if `DATABASE_URL` is unset or
+this hasn't been set for the tenant yet. This is what actually lets one
+shared orchestrator process pool serve multiple tenants under their own
+agency names, rather than one name fixed per deployment.
 
 ### 2c. Assign a phone number (PROP-101)
 
@@ -116,7 +140,7 @@ its piece:
 | Area | Reference |
 |---|---|
 | Tool Router (`search_properties`, `book_site_visit`, etc.) | `services/tool-router/README.md` |
-| Admin API (listings, calendar credentials) | `services/admin-api/main.py` (docstrings) |
+| Admin API (listings, calendar credentials, branding, auth) | `services/admin-api/README.md`, `services/admin-api/main.py` (docstrings) |
 | Database schema (all tables/fields) | `db/migrations/*.sql`, `db/migrations/README.md` |
 | Lead scoring rules | `services/lead-engine/README.md` |
 | Human transfer / escalation | `services/orchestrator/README.md` §"Human transfer" |
@@ -129,20 +153,23 @@ its piece:
 
 - No tenant "registration" endpoint or admin UI — onboarding today is
   direct API calls, documented above.
-- No per-tenant agency branding storage (§2b).
 - No DID-to-tenant routing (§2c) — needs PROP-101/102 deployed first.
-- No auth on any admin-api/tool-router endpoint — see
-  `infra/observability/SECURITY_AUDIT.md` §3. Anyone who can reach these
-  services can onboard/modify any tenant. Must be fixed before real
-  agency data goes through this.
+
+**Fixed 2026-09-10:** admin-api/tool-router auth (see
+`infra/observability/SECURITY_AUDIT.md` §3, `services/admin-api/README.md`
+and `services/tool-router/README.md`'s "Auth" sections) and per-tenant
+agency branding (§2b above, now stored in `tenant_settings` instead of a
+process-level env var).
 
 ## Definition of Done (from Sprint Plan)
 
 - [x] Onboarding guide covering listing import, calendar setup, and
       per-tenant call configuration.
 - [x] API reference index pointing to each service's authoritative doc.
+- [x] Per-tenant branding and admin-api/tool-router auth — see Stage 1b
+      and 2b above, and `infra/observability/SECURITY_AUDIT.md` §3.
 - [ ] Stages 3–8 of the plan's rollout (dry-run testing, soft launch,
       monitoring, scaling, iteration, full rollout) — operational
       process, not automated by this codebase.
-- [ ] Per-tenant branding, DID routing, and admin auth — documented
-      above as real gaps, not built.
+- [ ] DID-to-tenant routing — documented above as a real gap, needs
+      PROP-101/102 actually deployed first.

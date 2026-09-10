@@ -31,6 +31,10 @@ from system_prompt import build_system_prompt
 from tool_client import ToolRouterClient
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "gemini-client" / ".env")
+# INTERNAL_SERVICE_TOKEN -- ToolRouterClient sends it on every request now
+# (see ../tool_client.py); must match the real tool-router process's own
+# .env, started separately per this file's docstring.
+load_dotenv(Path(__file__).resolve().parent.parent.parent / "tool-router" / ".env")
 
 TEST_TENANT = "test-lead-qualification-live"
 TEST_PHONE = "+15125559999"

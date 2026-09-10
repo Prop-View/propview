@@ -40,6 +40,11 @@ from system_prompt import build_system_prompt  # noqa: E402
 from tool_client import ToolRouterClient  # noqa: E402
 
 load_dotenv(_SERVICES / "gemini-client" / ".env")
+# INTERNAL_SERVICE_TOKEN -- ToolRouterClient sends it on every request now
+# (see services/orchestrator/tool_client.py); must match the real
+# tool-router process's own .env, started separately per this file's
+# docstring.
+load_dotenv(_SERVICES / "tool-router" / ".env")
 
 TENANT_ID = "test-latency-bench"
 TOOL_ROUTER_URL = "http://localhost:8000"

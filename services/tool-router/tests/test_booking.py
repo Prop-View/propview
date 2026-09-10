@@ -33,6 +33,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "AC_test")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "token_test")
 os.environ.setdefault("TWILIO_SMS_FROM_NUMBER", "+15125550000")
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-internal-token")
 
 import asyncio
 
@@ -94,6 +95,7 @@ def client():
     # fixtures that aren't in a test's own parameter list never run.
     seeded_property_id = asyncio.run(_seed())
     with TestClient(app) as c:
+        c.headers["Authorization"] = f"Bearer {os.environ['INTERNAL_SERVICE_TOKEN']}"
         c.seeded_property_id = seeded_property_id  # stash for the property_id fixture below
         yield c
     asyncio.run(_cleanup())

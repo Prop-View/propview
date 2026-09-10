@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("DATABASE_URL", "postgresql://propview_app:devpassword@localhost/propview_dev")
 os.environ.setdefault("ENCRYPTION_KEY", "FG6ZzLBZnosF1kPSMHKpkDwpdPrinkzVBQ5I9CdMHEE=")  # test-only key
+os.environ.setdefault("PLATFORM_OPERATOR_TOKEN", "test-platform-token")
 
 import asyncio
 
@@ -36,6 +37,16 @@ async def _cleanup() -> None:
 def client():
     asyncio.run(_cleanup())
     with TestClient(app) as c:
+        # Stage 1 of docs/AGENCY_ONBOARDING.md's onboarding flow: provision
+        # the tenant (platform-operator-token-gated) to get its real admin
+        # API key, then use that key for every tenant-scoped call below --
+        # matching exactly how a real caller would have to bootstrap this.
+        provision_resp = c.post(
+            f"/admin/tenants/{TEST_TENANT}/provision",
+            headers={"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"},
+        )
+        assert provision_resp.status_code == 200, provision_resp.text
+        c.headers["Authorization"] = f"Bearer {provision_resp.json()['admin_api_key']}"
         yield c
     asyncio.run(_cleanup())
 
@@ -147,3 +158,100 @@ def test_calendar_credentials_upsert_overwrites(client):
 def test_calendar_credentials_missing_returns_nulls(client):
     resp = client.get(f"/admin/tenants/{TEST_TENANT}/calendar-credentials")
     assert resp.json() == {"provider": None, "credentials": None}
+
+
+def test_branding_roundtrip(client):
+    put_resp = client.put(f"/admin/tenants/{TEST_TENANT}/branding", json={"agency_name": "Austin Realty"})
+    assert put_resp.status_code == 200
+
+    get_resp = client.get(f"/admin/tenants/{TEST_TENANT}/branding")
+    assert get_resp.json() == {"agency_name": "Austin Realty"}
+
+
+def test_branding_upsert_overwrites(client):
+    client.put(f"/admin/tenants/{TEST_TENANT}/branding", json={"agency_name": "First Name"})
+    client.put(f"/admin/tenants/{TEST_TENANT}/branding", json={"agency_name": "Second Name"})
+
+    resp = client.get(f"/admin/tenants/{TEST_TENANT}/branding")
+    assert resp.json()["agency_name"] == "Second Name"
+
+
+def test_branding_missing_returns_null(client):
+    resp = client.get(f"/admin/tenants/{TEST_TENANT}/branding")
+    assert resp.json() == {"agency_name": None}
+
+
+# Auth (closes infra/observability/SECURITY_AUDIT.md section 3): per-tenant
+# API keys, not a shared secret -- a key provisioned for one tenant must
+# not authenticate requests for another.
+
+
+def test_provision_without_platform_token_is_rejected(client):
+    resp = client.post(f"/admin/tenants/{TEST_TENANT}/provision")
+    assert resp.status_code == 401
+
+
+def test_provision_with_wrong_platform_token_is_rejected(client):
+    resp = client.post(
+        f"/admin/tenants/{TEST_TENANT}/provision", headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert resp.status_code == 401
+
+
+def test_tenant_route_without_token_is_rejected(client):
+    saved = client.headers.pop("Authorization")
+    try:
+        resp = client.post(
+            f"/admin/tenants/{TEST_TENANT}/listings",
+            json={"listings": [{"address": "x", "city": "Austin", "state": "TX", "property_type": "house", "price": 1}]},
+        )
+    finally:
+        client.headers["Authorization"] = saved
+    assert resp.status_code == 401
+
+
+def test_tenant_route_with_another_tenants_key_is_rejected(client):
+    other_tenant = "test-admin-api-other"
+    provision_resp = client.post(
+        f"/admin/tenants/{other_tenant}/provision",
+        headers={"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"},
+    )
+    assert provision_resp.status_code == 200
+    other_tenants_key = provision_resp.json()["admin_api_key"]
+
+    saved = client.headers["Authorization"]
+    client.headers["Authorization"] = f"Bearer {other_tenants_key}"
+    try:
+        # other_tenant's own key must not authenticate a request for TEST_TENANT.
+        resp = client.get(f"/admin/tenants/{TEST_TENANT}/calendar-credentials")
+    finally:
+        client.headers["Authorization"] = saved
+
+    async def cleanup_other_tenant():
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        await conn.execute("SELECT set_config('app.tenant_id', $1, false)", other_tenant)
+        await conn.execute("DELETE FROM tenant_settings WHERE tenant_id = $1", other_tenant)
+        await conn.close()
+
+    asyncio.run(cleanup_other_tenant())
+    assert resp.status_code == 401
+
+
+def test_reprovisioning_invalidates_the_old_key(client):
+    old_key = client.headers["Authorization"]
+
+    reprovision_resp = client.post(
+        f"/admin/tenants/{TEST_TENANT}/provision",
+        headers={"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"},
+    )
+    assert reprovision_resp.status_code == 200
+    new_key = f"Bearer {reprovision_resp.json()['admin_api_key']}"
+    assert new_key != old_key
+
+    client.headers["Authorization"] = old_key
+    resp = client.get(f"/admin/tenants/{TEST_TENANT}/calendar-credentials")
+    assert resp.status_code == 401
+
+    client.headers["Authorization"] = new_key
+    resp = client.get(f"/admin/tenants/{TEST_TENANT}/calendar-credentials")
+    assert resp.status_code == 200

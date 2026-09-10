@@ -8,7 +8,7 @@ matching Gemini's tool-calling protocol) to real database-backed handlers.
 ```bash
 cd services/tool-router
 pip install -r requirements.txt
-cp .env.example .env   # DATABASE_URL (propview_app role, not superuser) + GEMINI_API_KEY for search_knowledge_base
+cp .env.example .env   # DATABASE_URL (propview_app role, not superuser), GEMINI_API_KEY for search_knowledge_base, and INTERNAL_SERVICE_TOKEN (see "Auth" below)
 uvicorn main:app --reload
 ```
 
@@ -24,6 +24,19 @@ RLS policies are fail-closed. **`DATABASE_URL` must point at the
 superuser — Postgres always bypasses RLS for superusers, so connecting as
 one would make this isolation silently do nothing (found by testing it,
 not assumed — see `db/migrations/README.md`).
+
+## Auth
+
+Closes `infra/observability/SECURITY_AUDIT.md` section 3's "no
+service-to-service authentication" finding for this service. Every route
+except `/health` requires `Authorization: Bearer <INTERNAL_SERVICE_TOKEN>`
+(`auth.py`) — a single shared secret, not per-tenant keys like admin-api
+(`../admin-api/README.md`'s "Auth" section): this service has exactly one
+legitimate caller class (the orchestrator), not one caller per tenant.
+`../orchestrator/tool_client.py`'s `ToolRouterClient` sends this
+automatically from `INTERNAL_SERVICE_TOKEN` in its own environment — no
+call-site changes needed anywhere that already constructs it, just the
+right `.env`.
 
 ## API
 
@@ -150,6 +163,17 @@ with no calendar configured rejected, and — the actual double-booking
 scenario the Redis lock exists for — a slot the mocked calendar reports
 busy gets rejected by the re-check-under-lock rather than silently
 double-booked.
+
+**Verified passing** 2026-09-10: 4 more cases for the new
+`INTERNAL_SERVICE_TOKEN` auth (`auth.py`) — `/tools/call` and
+`/tools/schema` both reject a missing or wrong token with 401, `/health`
+stays open without one. Also live-verified end to end against a real
+running instance: an unauthenticated `curl` correctly gets 401, and the
+real `INTERNAL_SERVICE_TOKEN` correctly reaches real Postgres data
+through `search_properties`. `test_tool_router.py` is now 22/22;
+combined with `test_booking.py`'s 5/5 (unaffected in count, just given
+the token so its existing requests still authenticate), the full suite
+is 27/27.
 
 ## Definition of Done (from Sprint Plan)
 

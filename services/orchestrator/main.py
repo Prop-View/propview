@@ -34,6 +34,7 @@ from livekit import api, rtc
 from conversation_context import ConversationContextStore
 from gemini_live_client import GeminiLiveSession
 from health_monitor import HealthMonitor
+from tenant_branding import get_agency_name
 from metrics import start_metrics_server
 from orchestrator import CallOrchestrator, build_gemini_tools
 from session_store import SessionStore
@@ -69,11 +70,17 @@ CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID")
 FALLBACK_LATENCY_THRESHOLD_MS = float(os.environ.get("FALLBACK_LATENCY_THRESHOLD_MS", "1200"))
 
 
-def _build_fallback_session_factory():
+def _build_fallback_session_factory(agency_name: str):
     """None if the fallback isn't fully configured. Deliberately imports
     CascadedFallbackSession lazily, inside here -- so a deployment that
     never sets these env vars doesn't need deepgram-sdk/openai/cartesia
-    installed at all."""
+    installed at all.
+
+    `agency_name` is passed in (the already-resolved, possibly
+    per-tenant one from tenant_branding.py), not read from the AGENCY_NAME
+    global directly -- the fallback session must speak under the same
+    agency name as the primary Gemini session it's standing in for, or a
+    caller mid-call would hear the wrong name after a fallback switch."""
     if not (DEEPGRAM_API_KEY and OPENAI_API_KEY and CARTESIA_API_KEY and CARTESIA_VOICE_ID):
         return None
 
@@ -85,7 +92,7 @@ def _build_fallback_session_factory():
             openai_api_key=OPENAI_API_KEY,
             cartesia_api_key=CARTESIA_API_KEY,
             cartesia_voice_id=CARTESIA_VOICE_ID,
-            system_prompt=build_system_prompt(AGENCY_NAME),
+            system_prompt=build_system_prompt(agency_name),
         )
         await session.__aenter__()
         return session
@@ -127,12 +134,26 @@ async def run_call(room_name: str) -> None:
     remote_tools = await tool_client.fetch_gemini_tools()
     gemini_tools = build_gemini_tools(remote_tools)
 
+    # PROP-602/docs/AGENCY_ONBOARDING.md Stage 2b: per-tenant branding
+    # (tenant_settings.agency_name) takes priority over the process-level
+    # AGENCY_NAME env var when DATABASE_URL is configured -- a shared
+    # orchestrator process pool serving multiple tenants needs this to
+    # vary by tenant_id, not be fixed per deployment. Falls back to the
+    # env var (default "our brokerage") if DATABASE_URL is unset, or the
+    # tenant hasn't set branding via PUT /admin/tenants/{id}/branding yet.
+    # Resolved before _build_fallback_session_factory() below, so the
+    # fallback session (if it's ever switched to mid-call) speaks under
+    # the same agency name as the primary one, not a stale env-var default.
+    agency_name = AGENCY_NAME
+    if DATABASE_URL is not None:
+        agency_name = await get_agency_name(DATABASE_URL, TENANT_ID, default=AGENCY_NAME)
+
     lk_api = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) if BROKER_PHONE_NUMBER else None
-    fallback_session_factory = _build_fallback_session_factory()
+    fallback_session_factory = _build_fallback_session_factory(agency_name)
     health_monitor = HealthMonitor(latency_threshold_ms=FALLBACK_LATENCY_THRESHOLD_MS) if fallback_session_factory else None
 
     async with GeminiLiveSession(
-        system_instruction=build_system_prompt(AGENCY_NAME), tools=gemini_tools
+        system_instruction=build_system_prompt(agency_name), tools=gemini_tools
     ) as gemini_session:
         # One detector per call -- its VADIterator carries hysteresis state
         # across audio windows, so it must not be shared between calls.

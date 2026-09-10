@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/propview_dev")
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-internal-token")
 
 import asyncpg
 import pytest
@@ -59,6 +60,7 @@ async def _cleanup() -> None:
 def client():
     asyncio.run(_seed())
     with TestClient(app) as c:
+        c.headers["Authorization"] = f"Bearer {os.environ['INTERNAL_SERVICE_TOKEN']}"
         yield c
     asyncio.run(_cleanup())
 
@@ -165,6 +167,52 @@ def test_tools_schema_lists_all_tools(client):
         "check_calendar_slots",
         "book_site_visit",
     }
+
+
+# Auth (closes infra/observability/SECURITY_AUDIT.md section 3). Reuses
+# the shared `client` fixture (not a fresh TestClient(app)) with its
+# Authorization header temporarily removed/overridden for one request,
+# then restored -- a second TestClient(app) instance while the
+# module-scoped one is still alive trips a real but unrelated asyncpg
+# pool/event-loop conflict (both lifespans share the same module-level
+# connection pool singleton in db.py).
+
+
+def test_tools_call_without_token_is_rejected(client):
+    saved = client.headers.pop("Authorization")
+    try:
+        resp = call_tool(client, "search_properties", {"city": "Austin"})
+    finally:
+        client.headers["Authorization"] = saved
+    assert resp.status_code == 401
+
+
+def test_tools_call_with_wrong_token_is_rejected(client):
+    saved = client.headers["Authorization"]
+    client.headers["Authorization"] = "Bearer wrong-token"
+    try:
+        resp = call_tool(client, "search_properties", {"city": "Austin"})
+    finally:
+        client.headers["Authorization"] = saved
+    assert resp.status_code == 401
+
+
+def test_tools_schema_without_token_is_rejected(client):
+    saved = client.headers.pop("Authorization")
+    try:
+        resp = client.get("/tools/schema")
+    finally:
+        client.headers["Authorization"] = saved
+    assert resp.status_code == 401
+
+
+def test_health_does_not_require_auth(client):
+    saved = client.headers.pop("Authorization")
+    try:
+        resp = client.get("/health")
+    finally:
+        client.headers["Authorization"] = saved
+    assert resp.status_code == 200
 
 
 def test_update_lead_qualification_requires_caller_phone_number(client):

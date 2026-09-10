@@ -19,9 +19,10 @@ load_dotenv()  # real gap found 2026-09-09: this was never called, so a
 # GEMINI_API_KEY at call time but tools.book_site_visit's own module-level
 # code (sys.path wiring) still runs at import time regardless.
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
 from pydantic import BaseModel, ValidationError  # noqa: E402
 
+from auth import require_internal_token  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
 from redis_client import close_redis_client  # noqa: E402
 from tools.book_site_visit import BookSiteVisitArgs, book_site_visit  # noqa: E402
@@ -67,7 +68,7 @@ class ToolCallRequest(BaseModel):
     lead_id: int | None = None
 
 
-@app.post("/tools/call")
+@app.post("/tools/call", dependencies=[Depends(require_internal_token)])
 async def call_tool(request: ToolCallRequest):
     if request.name not in TOOLS:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {request.name}")
@@ -90,7 +91,7 @@ async def call_tool(request: ToolCallRequest):
     return {"name": request.name, "result": result}
 
 
-@app.get("/tools/schema")
+@app.get("/tools/schema", dependencies=[Depends(require_internal_token)])
 async def tools_schema():
     """JSON schemas for each tool's args -- the source for the Gemini
     FunctionDeclaration configs the orchestrator will register (Sprint 3/4

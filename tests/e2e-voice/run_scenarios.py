@@ -23,6 +23,11 @@ from harness import run_scenario
 from scenarios import SCENARIOS
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "services" / "gemini-client" / ".env")
+# INTERNAL_SERVICE_TOKEN -- ToolRouterClient sends it on every request now
+# (see services/orchestrator/tool_client.py); must match the real
+# tool-router process's own .env, started separately per this file's
+# docstring.
+load_dotenv(Path(__file__).resolve().parent.parent.parent / "services" / "tool-router" / ".env")
 
 
 async def main() -> None:

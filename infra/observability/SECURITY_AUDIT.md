@@ -51,42 +51,53 @@ conservative than actually required — but this is worth re-checking
 whenever presidio-anonymizer itself is upgraded, since a future presidio
 release might genuinely need the older API.
 
-## 3. No service-to-service authentication — the biggest real gap
+## 3. No service-to-service authentication — fixed 2026-09-10
 
-Checked both internal HTTP services for auth middleware, JWT validation,
-or API keys on any route: **neither has any.** `services/tool-router/main.py`
-and `services/admin-api/main.py` accept every request from anyone who can
-reach the port, with `tenant_id` taken directly from the request body —
-meaning network access to either service is equivalent to full access to
-every tenant's data (RLS isolates tenants *from each other*, not
-unauthenticated callers from tenants).
+Originally the biggest real gap found by this audit: neither
+`services/tool-router/main.py` nor `services/admin-api/main.py` had any
+auth middleware, JWT validation, or API keys on any route — network
+access to either service was equivalent to full access to every tenant's
+data (RLS isolates tenants *from each other*, not unauthenticated callers
+from tenants).
 
-This is a real gap against the plan's own MVP Security Core requirement
-("JWT-based service-to-service auth"), not a previously-unknown one —
-`admin-api/main.py`'s calendar-credentials `GET` endpoint already had a
-docstring flagging this for itself, but the same gap is actually
-repo-wide across both services, every endpoint, not just that one.
+Implemented as this pass's own recommendation, not a rushed bolt-on:
+- **tool-router** (`services/tool-router/auth.py`): a single shared
+  secret (`INTERNAL_SERVICE_TOKEN`), since this service has exactly one
+  legitimate caller class (the orchestrator).
+- **admin-api** (`services/admin-api/auth.py`): per-tenant API keys, not
+  a shared secret — admin-api is tenant-facing (one real caller per
+  tenant), so a shared secret would let any tenant's caller act as any
+  other tenant. A new `POST /admin/tenants/{tenant_id}/provision` route
+  (gated by a separate `PLATFORM_OPERATOR_TOKEN`, held only by whoever
+  operates the platform) mints a tenant's key and shows it exactly once;
+  only its SHA-256 hash is ever stored
+  (`db/migrations/006_admin_api_auth.sql`).
 
-**Mitigated today only by network topology assumption** (these services
-are expected to run on a private network only the orchestrator/admin
-tooling can reach) — that assumption is never enforced in code, and nothing
-stops a misconfigured deployment from exposing either port publicly.
+Both fail closed if their configured secret is unset (500, not silently
+open). Live-verified end to end against real running instances, not just
+unit tests: an unauthenticated `curl` gets a real 401 from both services;
+the full provision → upload-listing → query-via-tool-router chain works
+with real credentials; a tenant's key confirmed rejected against a
+*different* tenant's routes (the actual point of per-tenant keys, not
+just "auth exists somewhere"). See `services/tool-router/README.md`'s and
+`services/admin-api/README.md`'s own "Auth" sections for the full detail
+and exact test counts.
 
-**Not fixed in this pass** — this is a real design decision (which auth
-scheme, how tenant admin auth differs from internal-service auth) that
-deserves its own ticket rather than a rushed middleware bolt-on.
-Recommended before any real deployment: shared-secret or mTLS between
-orchestrator↔tool-router (internal, fixed set of callers), and real
-tenant-scoped auth (JWT or session-based) in front of admin-api (external,
-one caller per tenant).
+Not literally "JWT-based" as the plan's MVP Security Core section names —
+bearer tokens checked with constant-time comparison achieve the same
+threat-model outcome (no unauthenticated/cross-tenant access) without a
+token-issuing/expiry/refresh apparatus this system doesn't otherwise
+need; upgrading to real JWTs later wouldn't change the tenant-key model
+above, only how the bearer token itself is validated.
 
 ## 4. No rate limiting anywhere
 
-Neither FastAPI service has request rate limiting. Combined with §3, an
-unauthenticated caller could brute-force `tenant_id` values or hammer
-`update_lead_qualification`/`book_site_visit` with no throttling.
-Same recommendation as §3 — solve auth first, rate limiting is a smaller
-follow-up once there's an identity to rate-limit *by*.
+Neither FastAPI service has request rate limiting. Now that §3 is fixed,
+an unauthenticated caller can no longer reach either service at all, so
+this is a smaller residual gap than it was (a caller who somehow obtained
+a valid token could still hammer an endpoint with no throttling) rather
+than the wide-open brute-force surface it used to be. Still worth solving
+as its own follow-up.
 
 ## 5. TLS (PROP-108) — config built, not yet deployed against a real cert
 
@@ -140,9 +151,9 @@ every other real-cloud-account dependency in this codebase):
 - [x] Secret-in-source-control audit — clean, verified not assumed.
 - [x] Dependency vulnerability scan — one real finding (cryptography),
       fixed; confirmed the rest is sandbox noise, not project exposure.
-- [x] Documented the real gaps: no service-to-service auth (the
-      significant one), no rate limiting.
+- [x] Documented the real gaps: no service-to-service auth, no rate
+      limiting.
 - [ ] HashiCorp Vault / AWS Secrets Manager actually stood up and wired
       in — needs a real cloud account, design documented above instead.
-- [ ] Service-to-service auth actually implemented — scoped as its own
-      follow-up, not a rushed bolt-on here.
+- [x] Service-to-service auth actually implemented — see section 3 above,
+      no longer a follow-up.

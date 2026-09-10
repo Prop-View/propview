@@ -109,6 +109,22 @@ if [ -z "$ENCRYPTION_KEY_VALUE" ]; then
     ENCRYPTION_KEY_VALUE="$("$VENV_PYTHON" -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 fi
 
+# One INTERNAL_SERVICE_TOKEN shared between orchestrator (sends it on
+# every Tool Router call) and tool-router (checks it) -- same reasoning as
+# ENCRYPTION_KEY above, just for auth.require_internal_token instead of
+# Fernet. See infra/observability/SECURITY_AUDIT.md section 3.
+INTERNAL_SERVICE_TOKEN_VALUE=""
+if [ -f services/tool-router/.env ]; then
+    INTERNAL_SERVICE_TOKEN_VALUE="$(grep -E '^INTERNAL_SERVICE_TOKEN=' services/tool-router/.env | head -1 | cut -d= -f2-)"
+fi
+if [ -z "$INTERNAL_SERVICE_TOKEN_VALUE" ]; then
+    INTERNAL_SERVICE_TOKEN_VALUE="$("$VENV_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+fi
+
+# PLATFORM_OPERATOR_TOKEN is admin-api-only (gates tenant provisioning) --
+# not shared with any other service, so no cross-file lookup needed.
+PLATFORM_OPERATOR_TOKEN_VALUE="$("$VENV_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
 setup_env_file() {
     local dir="$1"
     local env_file="$dir/.env"
@@ -122,6 +138,8 @@ setup_env_file() {
         sed -i '' "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$GEMINI_KEY|" "$env_file" 2>/dev/null || true
     fi
     sed -i '' "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$ENCRYPTION_KEY_VALUE|" "$env_file" 2>/dev/null || true
+    sed -i '' "s|^INTERNAL_SERVICE_TOKEN=.*|INTERNAL_SERVICE_TOKEN=$INTERNAL_SERVICE_TOKEN_VALUE|" "$env_file" 2>/dev/null || true
+    sed -i '' "s|^PLATFORM_OPERATOR_TOKEN=.*|PLATFORM_OPERATOR_TOKEN=$PLATFORM_OPERATOR_TOKEN_VALUE|" "$env_file" 2>/dev/null || true
     echo "  created $env_file"
 }
 
@@ -145,6 +163,8 @@ else
     echo "[x] GEMINI_API_KEY -- propagated to orchestrator/.env and tool-router/.env"
 fi
 echo "[x] ENCRYPTION_KEY -- generated once, shared correctly between admin-api and tool-router"
+echo "[x] INTERNAL_SERVICE_TOKEN -- generated once, shared correctly between orchestrator and tool-router"
+echo "[x] PLATFORM_OPERATOR_TOKEN -- generated for admin-api (gates tenant provisioning, see docs/AGENCY_ONBOARDING.md)"
 echo "[ ] TWILIO_*, DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY, Google Calendar credentials"
 echo "    -- real third-party accounts this script can't create for you. Every feature that"
 echo "    needs one degrades gracefully without it (see each service's own README's"

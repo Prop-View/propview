@@ -7,14 +7,30 @@ this doesn't hand-duplicate them), and executes calls against /tools/call.
 
 from __future__ import annotations
 
+import os
+
 import httpx
 from google.genai import types
 
 
 class ToolRouterClient:
-    def __init__(self, base_url: str = "http://localhost:8000", tenant_id: str = "default"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        tenant_id: str = "default",
+        internal_token: str | None = None,
+    ):
         self._tenant_id = tenant_id
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=10.0)
+        # Defaults from the environment so every existing call site (main.py,
+        # test harnesses, latency_benchmark.py, ...) picks this up correctly
+        # just from having the right .env loaded, with no code changes.
+        # None here (unset) means every request gets a 401 from tool-router's
+        # own auth.require_internal_token -- a loud, immediate failure, not
+        # a silent bypass, which is the right fail-closed behavior for a
+        # missing credential.
+        token = internal_token if internal_token is not None else os.environ.get("INTERNAL_SERVICE_TOKEN")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=10.0, headers=headers)
 
     async def fetch_gemini_tools(self) -> list[types.Tool]:
         resp = await self._client.get("/tools/schema")

@@ -36,43 +36,53 @@ IDs from `Sprint Plan.md`. New tenant? Start at `docs/AGENCY_ONBOARDING.md`.
 
 ## Status
 
-As of 2026-09-09: **43 of 49 tickets Done** (tracked in Jira project
-`PROP`). The 6 remaining are each genuinely blocked, not just
-unstarted — see the exact list below. Everything else is built and
-tested, either live-verified against the real API/service or (where a
-real third-party account isn't available in this environment — Twilio,
-Google Calendar OAuth, Deepgram, OpenAI, Cartesia) verified as far as
-possible: a fake key reaching that provider's real 401, not a local
-failure, with the remaining gap documented in the relevant README rather
-than silently assumed complete.
+As of 2026-09-10: **48 of 49 tickets Done** (tracked in Jira project
+`PROP`). Everything else is built and tested, either live-verified
+against the real API/service or (where a real third-party account isn't
+available in this environment — Twilio, Google Calendar OAuth, Deepgram,
+OpenAI, Cartesia) verified as far as possible: a fake key reaching that
+provider's real 401, not a local failure, with the remaining gap
+documented in the relevant README rather than silently assumed complete.
 
-- **Sprint 1** (voice loop) — done, live-verified end to end except
-  PROP-101/102/108 (real telephony/TLS deployment).
+- **Sprint 1** (voice loop) — done, live-verified end to end. PROP-101/102
+  (real telephony/VM deployment) and PROP-108 (TLS) each have complete,
+  runnable infra code; the one remaining step for all three is real cloud
+  credentials/a real domain this environment doesn't have.
 - **Sprint 2** (turn-taking) — done: predictive barge-in live-verified
-  against a real LiveKit call. PROP-201 (AEC3) doesn't apply to this
-  architecture (documented in `docs/sprint-notes/sprint-2-turn-taking.md`);
-  PROP-204's literal "exact millisecond" wording isn't achievable with
-  Gemini's current transcription API.
-- **Sprint 3** (property RAG & tools) — done, live-verified.
+  against a real LiveKit call, and transcript truncation on barge-in
+  (PROP-204) live-verified against a real LiveKit call + real Redis
+  context window. PROP-201 (AEC3) doesn't apply to this architecture
+  (documented in `docs/sprint-notes/sprint-2-turn-taking.md`); PROP-204's
+  literal "exact millisecond" wording isn't achievable with Gemini's
+  current transcription API — chunk-granularity truncation is what's
+  built and verified.
+- **Sprint 3** (property RAG & tools) — done, live-verified, including a
+  real latency benchmark (PROP-306/23): the Tool Router itself is well
+  within budget, the full Gemini turn exceeds the plan's raw 900ms target
+  at p95 — a real, documented finding, mitigated (not fixed) by the
+  Interactive Vocal Filler.
 - **Sprint 4** (lead qualification & booking) — done: BANT extraction
   live-verified against a real Gemini call; calendar/SMS built against
   mocked-then-real-API-boundary-tested Google/Twilio clients.
-- **Sprint 5** (fallback & compliance) — done except PROP-507 (stress
-  testing, blocked on a real call to stress). Fair Housing filter is
-  built and tested but not live-wired (documented open design problem,
-  see `services/compliance/README.md`).
+- **Sprint 5** (fallback & compliance) — done, including live fallback
+  stress testing (PROP-507/40) that caught and fixed a real bug (a
+  sub-threshold error was killing the caller-audio-forwarding task before
+  the fallback could ever trigger). Fair Housing filter is built and
+  tested but not live-wired (documented open design problem, see
+  `services/compliance/README.md`).
 - **Sprint 6** (hardening & multi-tenancy) — done except PROP-608 (pilot
-  launch, needs a real agency partner). RLS, Tenant Admin API, Grafana
-  dashboards, security audit, the 12-scenario E2E voice test suite
-  (live-verified against real Gemini), and a Locust load test
-  (live-verified against a real local LiveKit server) are all built.
+  launch, needs a real agency partner — see below). RLS, Tenant Admin API,
+  Grafana dashboards, the 12-scenario E2E voice test suite (live-verified
+  against real Gemini), and a Locust load test (live-verified against a
+  real local LiveKit server) are all built. The security audit's own
+  biggest finding — no service-to-service authentication — is now fixed
+  too: per-tenant API keys on admin-api, a shared internal secret on the
+  Tool Router, both live-verified end to end (see
+  `infra/observability/SECURITY_AUDIT.md` §3).
 
-**The 6 remaining tickets**: PROP-8 (TLS — needs real deployment),
-PROP-10 (AEC3 — doesn't apply to this architecture), PROP-13
-(millisecond-exact transcript truncation — not achievable with Gemini's
-current transcription API), PROP-23 (tool latency benchmarking at load),
-PROP-40 (fallback stress testing — needs a real call to stress), PROP-49
-(pilot launch — needs a real agency partner).
+**The 1 remaining ticket**: PROP-49/608 (soft launch pilot deployment) —
+needs an actual real estate agency partner and live inbound call traffic,
+which cannot be simulated or built in code.
 
 Per-service Definition of Done checklists (with dates and exact test
 counts) live in each service's own README — this summary is the index,

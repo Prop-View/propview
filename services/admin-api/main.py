@@ -15,9 +15,10 @@ from dotenv import load_dotenv
 load_dotenv()  # real gap found 2026-09-09: this was never called here --
 # see services/tool-router/main.py's identical fix for the full story.
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from auth import generate_api_key, hash_key, require_platform_token, require_tenant_auth  # noqa: E402
 from crypto import decrypt, encrypt  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
 
@@ -47,6 +48,10 @@ class CalendarCredentialsRequest(BaseModel):
     credentials: dict
 
 
+class BrandingRequest(BaseModel):
+    agency_name: str
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_pool()
@@ -57,7 +62,32 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
 
 
-@app.post("/admin/tenants/{tenant_id}/listings")
+@app.post("/admin/tenants/{tenant_id}/provision", dependencies=[Depends(require_platform_token)])
+async def provision_tenant(tenant_id: str):
+    """Stage 1 of docs/AGENCY_ONBOARDING.md's onboarding flow -- the very
+    first call for a brand-new tenant. Generates a fresh admin API key,
+    stores only its hash, and returns the plaintext key exactly once (the
+    caller -- platform ops onboarding the agency -- must save it now;
+    there is no recovery endpoint, only re-provisioning, which invalidates
+    the old key). Gated by the platform operator token, not a tenant key,
+    since no tenant key exists yet for a brand-new tenant."""
+    api_key = generate_api_key()
+    async with tenant_connection(tenant_id) as conn:
+        await conn.execute(
+            """
+            INSERT INTO tenant_settings (tenant_id, admin_api_key_hash, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                admin_api_key_hash = EXCLUDED.admin_api_key_hash,
+                updated_at = now()
+            """,
+            tenant_id,
+            hash_key(api_key),
+        )
+    return {"tenant_id": tenant_id, "admin_api_key": api_key}
+
+
+@app.post("/admin/tenants/{tenant_id}/listings", dependencies=[Depends(require_tenant_auth)])
 async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
     if not request.listings:
         raise HTTPException(status_code=400, detail="listings must not be empty")
@@ -93,7 +123,34 @@ async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
     return {"inserted": len(inserted_ids), "ids": inserted_ids}
 
 
-@app.put("/admin/tenants/{tenant_id}/calendar-credentials")
+@app.put("/admin/tenants/{tenant_id}/branding", dependencies=[Depends(require_tenant_auth)])
+async def set_branding(tenant_id: str, request: BrandingRequest):
+    """docs/AGENCY_ONBOARDING.md Stage 2b -- per-tenant agency name,
+    looked up by services/orchestrator/tenant_branding.py at call start.
+    Same upsert shape as set_calendar_credentials below, same table."""
+    async with tenant_connection(tenant_id) as conn:
+        await conn.execute(
+            """
+            INSERT INTO tenant_settings (tenant_id, agency_name, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                agency_name = EXCLUDED.agency_name,
+                updated_at = now()
+            """,
+            tenant_id,
+            request.agency_name,
+        )
+    return {"status": "ok"}
+
+
+@app.get("/admin/tenants/{tenant_id}/branding", dependencies=[Depends(require_tenant_auth)])
+async def get_branding(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow("SELECT agency_name FROM tenant_settings WHERE tenant_id = $1", tenant_id)
+    return {"agency_name": row["agency_name"] if row else None}
+
+
+@app.put("/admin/tenants/{tenant_id}/calendar-credentials", dependencies=[Depends(require_tenant_auth)])
 async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsRequest):
     encrypted = encrypt(json.dumps(request.credentials))
     async with tenant_connection(tenant_id) as conn:
@@ -113,11 +170,8 @@ async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsR
     return {"status": "ok"}
 
 
-@app.get("/admin/tenants/{tenant_id}/calendar-credentials")
+@app.get("/admin/tenants/{tenant_id}/calendar-credentials", dependencies=[Depends(require_tenant_auth)])
 async def get_calendar_credentials(tenant_id: str):
-    """NOTE: no authentication/authorization on this endpoint -- fine for
-    local dev, but this MUST be locked down (internal-only network, auth
-    middleware) before any real deployment. Not addressed by this ticket."""
     async with tenant_connection(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT calendar_provider, encrypted_calendar_credentials FROM tenant_settings WHERE tenant_id = $1",
