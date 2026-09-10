@@ -89,3 +89,7 @@ which cannot be simulated or built in code.
 Per-service Definition of Done checklists (with dates and exact test
 counts) live in each service's own README — this summary is the index,
 not the source of truth.
+
+## License
+
+Copyright (c) 2026 Aahil Shaik. All rights reserved. See `LICENSE`.
