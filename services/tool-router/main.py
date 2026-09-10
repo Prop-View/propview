@@ -24,7 +24,8 @@ from pydantic import BaseModel, ValidationError  # noqa: E402
 
 from auth import require_internal_token  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
-from redis_client import close_redis_client  # noqa: E402
+from rate_limit import enforce_rate_limit  # noqa: E402
+from redis_client import close_redis_client, get_redis_client  # noqa: E402
 from tools.book_site_visit import BookSiteVisitArgs, book_site_visit  # noqa: E402
 from tools.check_calendar_slots import CheckCalendarSlotsArgs, check_calendar_slots  # noqa: E402
 from tools.get_property_details import GetPropertyDetailsArgs, get_property_details  # noqa: E402
@@ -70,6 +71,13 @@ class ToolCallRequest(BaseModel):
 
 @app.post("/tools/call", dependencies=[Depends(require_internal_token)])
 async def call_tool(request: ToolCallRequest):
+    # PROP-606 follow-up (SECURITY_AUDIT.md section 4): per-tenant, not
+    # per-caller -- the caller is always the same authenticated
+    # orchestrator, what this actually protects is one tenant's calls
+    # from monopolizing shared Postgres/Redis that every other tenant's
+    # calls also depend on.
+    await enforce_rate_limit(get_redis_client(), key=request.tenant_id)
+
     if request.name not in TOOLS:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {request.name}")
 

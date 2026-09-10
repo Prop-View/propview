@@ -38,6 +38,17 @@ automatically from `INTERNAL_SERVICE_TOKEN` in its own environment — no
 call-site changes needed anywhere that already constructs it, just the
 right `.env`.
 
+## Rate limiting
+
+Closes `infra/observability/SECURITY_AUDIT.md` section 4's "no rate
+limiting anywhere" finding for this service. `rate_limit.py`: 120
+requests / 10s per `tenant_id` on `/tools/call` (a Redis fixed-window
+counter), configurable via `RATE_LIMIT_TOOL_CALLS_PER_WINDOW`/
+`RATE_LIMIT_WINDOW_SECONDS`. Protects shared Postgres/Redis from one
+tenant's calls (legitimately authenticated, but buggy or abusive)
+monopolizing it — not a defense against unauthenticated traffic, which
+`auth.py` above already rejects before this ever runs.
+
 ## API
 
 ```
@@ -172,8 +183,17 @@ running instance: an unauthenticated `curl` correctly gets 401, and the
 real `INTERNAL_SERVICE_TOKEN` correctly reaches real Postgres data
 through `search_properties`. `test_tool_router.py` is now 22/22;
 combined with `test_booking.py`'s 5/5 (unaffected in count, just given
-the token so its existing requests still authenticate), the full suite
-is 27/27.
+the token so its existing requests still authenticate), the suite was
+27/27.
+
+**Verified passing** 2026-09-10: 4 more cases (`test_rate_limit.py`) for
+the new per-tenant rate limiting — under-limit allowed, over-limit
+rejected with 429, independent tenants have independent budgets, and the
+budget correctly resets in a new window. Also live-verified against a
+real running instance: 125 real `search_properties` calls in a tight
+loop against the configured 120/10s limit returned exactly 120×200 then
+5×429 — the limit fires at precisely the configured threshold. Full
+suite total is now 31/31.
 
 ## Definition of Done (from Sprint Plan)
 

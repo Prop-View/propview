@@ -90,14 +90,38 @@ token-issuing/expiry/refresh apparatus this system doesn't otherwise
 need; upgrading to real JWTs later wouldn't change the tenant-key model
 above, only how the bearer token itself is validated.
 
-## 4. No rate limiting anywhere
+## 4. No rate limiting anywhere — fixed 2026-09-10
 
-Neither FastAPI service has request rate limiting. Now that §3 is fixed,
-an unauthenticated caller can no longer reach either service at all, so
-this is a smaller residual gap than it was (a caller who somehow obtained
-a valid token could still hammer an endpoint with no throttling) rather
-than the wide-open brute-force surface it used to be. Still worth solving
-as its own follow-up.
+Neither FastAPI service had request rate limiting. Now that §3 is fixed,
+the threat this actually defends against isn't an unauthenticated flood
+(rejected before touching Redis/Postgres at all) — it's a single
+authenticated caller (a buggy or abusive tenant, or a leaked/misused
+tenant API key) monopolizing shared infrastructure every other tenant's
+traffic also depends on.
+
+Implemented in both services, per tenant, via a Redis fixed-window
+counter (`INCR`/`EXPIRE`) — not a sliding window or token bucket; simpler,
+and its known failure mode (a caller can burst up to ~2x the limit right
+at a window boundary) is a minor gap against the real threat model here
+(sustained abuse, not one well-timed burst):
+
+- `services/tool-router/rate_limit.py`: 120 requests / 10s per tenant on
+  `/tools/call` (the tenant_id lives in the request body there, so this
+  is enforced inline in the route handler, not a `Depends()`).
+- `services/admin-api/rate_limit.py`: 30 requests / 60s per tenant across
+  every tenant-scoped route (shared budget, not per-route — the point is
+  bounding one tenant's *overall* traffic), with a separately, much
+  tighter 5 requests / 60s budget just for `/provision` (mints/rotates a
+  tenant's credential, a materially more sensitive action).
+
+Both configurable via env vars (`RATE_LIMIT_*`, see each service's
+`.env.example`) with the above as defaults. Live-verified against real
+running instances, not just unit tests: 125 real HTTP calls to
+tool-router in a tight loop returned exactly 120×200 then 5×429; 35 real
+calls to admin-api returned exactly 29×200 then 6×429 (one request
+already consumed by an earlier `/provision` call sharing the same
+per-tenant budget) — the limits fire at exactly the configured
+threshold, not approximately.
 
 ## 5. TLS (PROP-108) — config built, not yet deployed against a real cert
 
@@ -157,3 +181,5 @@ every other real-cloud-account dependency in this codebase):
       in — needs a real cloud account, design documented above instead.
 - [x] Service-to-service auth actually implemented — see section 3 above,
       no longer a follow-up.
+- [x] Rate limiting actually implemented — see section 4 above, no
+      longer a follow-up.

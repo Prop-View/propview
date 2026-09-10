@@ -112,6 +112,7 @@ secrets).
 | `INTERNAL_SERVICE_TOKEN` | **Yes, no default** | Must match `orchestrator`'s value — see above. Every route except `/health` rejects requests without it (401); service refuses to authenticate anyone (500) if this itself is unset. |
 | `ENCRYPTION_KEY` | **Yes, no default** | Must match `admin-api`'s value exactly — this is what decrypts calendar credentials `admin-api` encrypted. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. `setup_dev_env.sh` generates and shares this automatically. |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_SMS_FROM_NUMBER` / `TWILIO_WHATSAPP_FROM_NUMBER` | No | Booking confirmation SMS. Unset = booking still succeeds, confirmation just skipped. |
+| `RATE_LIMIT_TOOL_CALLS_PER_WINDOW` / `RATE_LIMIT_WINDOW_SECONDS` | No | Per-tenant rate limit on `/tools/call`. Defaults `120` requests / `10` seconds. See section 4.3. |
 
 **`services/admin-api/.env`** — tenant onboarding/management
 | Var | Required? | Notes |
@@ -119,6 +120,8 @@ secrets).
 | `DATABASE_URL` | **Yes, set explicitly** | Same `propview_app`-role requirement and fallback-default caveat as tool-router above. |
 | `ENCRYPTION_KEY` | **Yes, no default** | Must match `tool-router`'s value — see above. |
 | `PLATFORM_OPERATOR_TOKEN` | **Yes, no default** | Gates `POST /admin/tenants/{id}/provision` — held only by whoever operates this platform, **never** given to an agency. Not shared with any other service. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Service refuses to authenticate anyone (500) if unset. |
+| `REDIS_URL` | Has a local default | `redis://localhost:6379` if unset. Backs per-tenant rate limiting. |
+| `RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW` / `RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW` / `RATE_LIMIT_WINDOW_SECONDS` | No | Defaults `30` / `5` requests per `60` seconds. See section 4.3. |
 
 **`db/migrations/.env`** — schema setup (run once)
 | Var | Required? | Notes |
@@ -346,8 +349,14 @@ replacement for them.
   gates only the provisioning route that mints those tenant keys.
 - Both fail closed (500) if their configured secret is unset — never
   silently open.
+- Both are also rate limited **per tenant**, via a Redis fixed-window
+  counter (`rate_limit.py` in each service) — 120 req/10s on tool-router's
+  `/tools/call`, 30 req/60s on admin-api's routes generally and a
+  separate, tighter 5 req/60s just for `/provision`. This defends against
+  one *authenticated* tenant monopolizing shared Postgres/Redis, not
+  against unauthenticated traffic (auth above already rejects that first).
 
-Full design rationale: `infra/observability/SECURITY_AUDIT.md` section 3.
+Full design rationale: `infra/observability/SECURITY_AUDIT.md` sections 3–4.
 
 ### 4.4 Multi-tenancy (read this before adding a new table)
 

@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field  # noqa: E402
 from auth import generate_api_key, hash_key, require_platform_token, require_tenant_auth  # noqa: E402
 from crypto import decrypt, encrypt  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
+from rate_limit import PROVISION_LIMIT, rate_limited  # noqa: E402
+from redis_client import close_redis_client  # noqa: E402
 
 
 class ListingUpload(BaseModel):
@@ -57,12 +59,16 @@ async def lifespan(app: FastAPI):
     await get_pool()
     yield
     await close_pool()
+    await close_redis_client()
 
 
 app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
 
 
-@app.post("/admin/tenants/{tenant_id}/provision", dependencies=[Depends(require_platform_token)])
+@app.post(
+    "/admin/tenants/{tenant_id}/provision",
+    dependencies=[Depends(require_platform_token), Depends(rate_limited(PROVISION_LIMIT))],
+)
 async def provision_tenant(tenant_id: str):
     """Stage 1 of docs/AGENCY_ONBOARDING.md's onboarding flow -- the very
     first call for a brand-new tenant. Generates a fresh admin API key,
@@ -87,7 +93,10 @@ async def provision_tenant(tenant_id: str):
     return {"tenant_id": tenant_id, "admin_api_key": api_key}
 
 
-@app.post("/admin/tenants/{tenant_id}/listings", dependencies=[Depends(require_tenant_auth)])
+@app.post(
+    "/admin/tenants/{tenant_id}/listings",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
 async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
     if not request.listings:
         raise HTTPException(status_code=400, detail="listings must not be empty")
@@ -123,7 +132,10 @@ async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
     return {"inserted": len(inserted_ids), "ids": inserted_ids}
 
 
-@app.put("/admin/tenants/{tenant_id}/branding", dependencies=[Depends(require_tenant_auth)])
+@app.put(
+    "/admin/tenants/{tenant_id}/branding",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
 async def set_branding(tenant_id: str, request: BrandingRequest):
     """docs/AGENCY_ONBOARDING.md Stage 2b -- per-tenant agency name,
     looked up by services/orchestrator/tenant_branding.py at call start.
@@ -143,14 +155,20 @@ async def set_branding(tenant_id: str, request: BrandingRequest):
     return {"status": "ok"}
 
 
-@app.get("/admin/tenants/{tenant_id}/branding", dependencies=[Depends(require_tenant_auth)])
+@app.get(
+    "/admin/tenants/{tenant_id}/branding",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
 async def get_branding(tenant_id: str):
     async with tenant_connection(tenant_id) as conn:
         row = await conn.fetchrow("SELECT agency_name FROM tenant_settings WHERE tenant_id = $1", tenant_id)
     return {"agency_name": row["agency_name"] if row else None}
 
 
-@app.put("/admin/tenants/{tenant_id}/calendar-credentials", dependencies=[Depends(require_tenant_auth)])
+@app.put(
+    "/admin/tenants/{tenant_id}/calendar-credentials",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
 async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsRequest):
     encrypted = encrypt(json.dumps(request.credentials))
     async with tenant_connection(tenant_id) as conn:
@@ -170,7 +188,10 @@ async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsR
     return {"status": "ok"}
 
 
-@app.get("/admin/tenants/{tenant_id}/calendar-credentials", dependencies=[Depends(require_tenant_auth)])
+@app.get(
+    "/admin/tenants/{tenant_id}/calendar-credentials",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
 async def get_calendar_credentials(tenant_id: str):
     async with tenant_connection(tenant_id) as conn:
         row = await conn.fetchrow(

@@ -36,6 +36,18 @@ since these are high-entropy random tokens, not low-entropy human
 passwords (no bcrypt/scrypt/argon2 needed). Re-provisioning a tenant
 invalidates its previous key immediately.
 
+## Rate limiting
+
+Closes `infra/observability/SECURITY_AUDIT.md` section 4's "no rate
+limiting anywhere" finding for this service. `rate_limit.py`: 30
+requests / 60s per `tenant_id`, shared across every tenant-scoped route
+below (one budget for the tenant overall, not per-route), plus a
+separate, much tighter 5 requests / 60s budget just for `/provision`
+(mints/rotates a tenant's credential — a materially more sensitive
+action than a listing upload). Configurable via
+`RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW`/`RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW`/
+`RATE_LIMIT_WINDOW_SECONDS`.
+
 ## API
 
 All routes below require `Authorization: Bearer <tenant's admin_api_key>`
@@ -95,6 +107,17 @@ returned key → query both back, plus confirming `search_properties`
 reaches the same data via a real running Tool Router using its own
 shared secret, and that a wrong/missing credential gets a real 401 from
 each service, not a local mock.
+
+**Verified passing** 2026-09-10: 5 more cases (`test_rate_limit.py`) for
+the new per-tenant rate limiting — under-limit allowed, over-limit
+rejected with 429, independent tenants have independent budgets, and a
+lower-limit route sharing a budget with an already-incremented
+higher-limit route correctly rejects sooner. Also live-verified against
+real running instances: 35 real calls in a tight loop against the
+configured 30/60s limit (one already consumed by an earlier `/provision`
+call, since the budget is shared across routes) returned exactly 29×200
+then 6×429 — the limit fires at precisely the configured threshold. Full
+suite total is now 21/21.
 
 ## Definition of Done (from Sprint Plan)
 

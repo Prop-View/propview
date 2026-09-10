@@ -13,6 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("DATABASE_URL", "postgresql://propview_app:devpassword@localhost/propview_dev")
 os.environ.setdefault("ENCRYPTION_KEY", "FG6ZzLBZnosF1kPSMHKpkDwpdPrinkzVBQ5I9CdMHEE=")  # test-only key
 os.environ.setdefault("PLATFORM_OPERATOR_TOKEN", "test-platform-token")
+# High enough that this file's own functional tests (which all share
+# TEST_TENANT, and each make several calls) never trip it by accident --
+# tests/test_rate_limit.py is what actually exercises rate_limit.py's
+# real, tight limits, constructing its own dependency instances directly
+# rather than going through these process-wide env-var defaults.
+os.environ.setdefault("RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW", "10000")
+os.environ.setdefault("RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW", "10000")
 
 import asyncio
 
