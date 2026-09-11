@@ -51,6 +51,17 @@ conservative than actually required — but this is worth re-checking
 whenever presidio-anonymizer itself is upgraded, since a future presidio
 release might genuinely need the older API.
 
+**Rescanned 2026-09-11**, against `./.venv` (`scripts/setup_dev_env.sh`'s
+own venv, built purely from this project's 13 `requirements.txt` files —
+no dev-sandbox noise to filter this time, unlike the original scan
+above): **164 packages, zero known vulnerabilities.**
+`cryptography==50.0.1` (above the `>=49.0.0` floor set above, and no new
+CVE registered against 50.x since). The `redis` dependency added to
+`services/admin-api/requirements.txt` this session (for rate limiting)
+is clean too (`8.1.0`). One benign skip: `en-core-web-sm` (spaCy's
+language model) isn't a PyPI package pip-audit can look up — expected,
+not a gap.
+
 ## 3. No service-to-service authentication — fixed 2026-09-10
 
 Originally the biggest real gap found by this audit: neither
