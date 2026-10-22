@@ -7,6 +7,7 @@ tenant-scoped lookup on the actual SELECT, not just the fallback logic.
 Run: python -m pytest tests/test_tenant_branding.py -v
 """
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -18,7 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tenant_branding import get_agency_name
 
-DATABASE_URL = "postgresql://propview_app:devpassword@localhost/propview_dev"
+# os.environ.get, not a hardcoded literal: this file used to hardcode
+# "localhost" (implying the default port 5432), silently ignoring any
+# DATABASE_URL environment override every other test file in this repo
+# respects -- breaks the moment Postgres runs on a non-default port (e.g.
+# a Dockerized instance sharing a machine with an unrelated native
+# Postgres install already listening on 5432). Found by actually running
+# this suite against a Docker Postgres on port 5433.
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://propview_app:devpassword@localhost/propview_dev")
 
 
 def unique_tenant_id() -> str:

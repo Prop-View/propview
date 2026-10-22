@@ -16,6 +16,11 @@ instructs Gemini on when to call this.
 
 Runs PROP-405's scoring (../../lead-engine/lead_scoring.py) every time,
 so `leads.priority` always reflects the lead's current known state.
+
+Contact/lead creation itself goes through `_lead_context.ensure_contact_and_lead`,
+the same helper `book_site_visit.py` uses -- previously this file had its own
+separate copy of that insert logic, which had drifted out of sync with the
+helper's own docstring claiming both files already shared it.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import asyncpg
 from pydantic import BaseModel, Field
 
 from db import record_to_dict
+from tools._lead_context import ensure_contact_and_lead
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lead-engine"))
 from lead_scoring import score_lead  # noqa: E402
@@ -73,66 +79,32 @@ async def update_lead_qualification(
     if not caller_phone_number:
         raise ValueError("caller_phone_number is required to identify the contact")
 
-    contact_row = await connection.fetchrow(
-        """
-        INSERT INTO contacts (tenant_id, full_name, phone_number)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (tenant_id, phone_number)
-        DO UPDATE SET full_name = COALESCE(EXCLUDED.full_name, contacts.full_name)
-        RETURNING id
-        """,
-        tenant_id,
-        args.caller_full_name,
-        caller_phone_number,
+    contact_id, lead_id = await ensure_contact_and_lead(
+        connection, tenant_id, caller_phone_number, lead_id, args.caller_full_name
     )
-    contact_id = contact_row["id"]
 
-    if lead_id is not None:
-        lead_row = await connection.fetchrow(
-            """
-            UPDATE leads SET
-                property_id    = COALESCE($1, property_id),
-                intent         = COALESCE($2, intent),
-                budget_min     = COALESCE($3, budget_min),
-                budget_max     = COALESCE($4, budget_max),
-                timeline       = COALESCE($5, timeline),
-                decision_maker = COALESCE($6, decision_maker),
-                updated_at     = now()
-            WHERE id = $7 AND tenant_id = $8
-            RETURNING *
-            """,
-            args.property_id,
-            args.intent,
-            args.budget_min,
-            args.budget_max,
-            args.timeline,
-            args.decision_maker,
-            lead_id,
-            tenant_id,
-        )
-        # Defensive fallback: the lead_id the orchestrator remembered no
-        # longer exists under this tenant (shouldn't happen in practice --
-        # nothing deletes leads -- but don't silently drop the caller's
-        # information if it somehow does).
-        if lead_row is None:
-            lead_id = None
-
-    if lead_id is None:
-        lead_row = await connection.fetchrow(
-            """
-            INSERT INTO leads (tenant_id, contact_id, property_id, intent, budget_min, budget_max, timeline, decision_maker)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING *
-            """,
-            tenant_id,
-            contact_id,
-            args.property_id,
-            args.intent,
-            args.budget_min,
-            args.budget_max,
-            args.timeline,
-            args.decision_maker,
-        )
+    lead_row = await connection.fetchrow(
+        """
+        UPDATE leads SET
+            property_id    = COALESCE($1, property_id),
+            intent         = COALESCE($2, intent),
+            budget_min     = COALESCE($3, budget_min),
+            budget_max     = COALESCE($4, budget_max),
+            timeline       = COALESCE($5, timeline),
+            decision_maker = COALESCE($6, decision_maker),
+            updated_at     = now()
+        WHERE id = $7 AND tenant_id = $8
+        RETURNING *
+        """,
+        args.property_id,
+        args.intent,
+        args.budget_min,
+        args.budget_max,
+        args.timeline,
+        args.decision_maker,
+        lead_id,
+        tenant_id,
+    )
 
     lead = record_to_dict(lead_row)
     priority = score_lead(lead)

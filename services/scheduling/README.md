@@ -90,5 +90,7 @@ python -m pytest tests/ -v
       real credentials available in this environment.
 - [ ] E2E API testing for appointment booking and lead capture (PROP-406)
       — tracked in `../../tests/integration/`.
-- [ ] PROP-503 (SIP call transfer) / PROP-504 (pre-transfer webhook) —
-      not built yet.
+- [x] PROP-503 (SIP call transfer) / PROP-504 (pre-transfer webhook) —
+      this line was stale: both are actually built, in `../orchestrator/`
+      (`human_transfer.py`, `pre_transfer_summary.py`), per the "PROP-503
+      / PROP-504" note above. Corrected 2026-10-18.

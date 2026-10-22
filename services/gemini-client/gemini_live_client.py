@@ -25,6 +25,23 @@ INPUT_SAMPLE_RATE_HZ = 16000
 OUTPUT_SAMPLE_RATE_HZ = 24000
 DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 
+# All 30 prebuilt voices Gemini Live/TTS currently share, with Google's own
+# one-word character descriptor -- https://ai.google.dev/gemini-api/docs/speech-generation.
+# Not enforced client-side (the SDK's PrebuiltVoiceConfig.voice_name is a
+# plain Optional[str], validated server-side, not a client-side enum) --
+# kept here so GEMINI_VOICE_NAME has a documented, spellable set of options
+# rather than sending an unverified guess.
+PREBUILT_VOICES = {
+    "Zephyr": "Bright", "Puck": "Upbeat", "Charon": "Informative", "Kore": "Firm",
+    "Fenrir": "Excitable", "Leda": "Youthful", "Orus": "Firm", "Aoede": "Breezy",
+    "Callirrhoe": "Easy-going", "Autonoe": "Bright", "Enceladus": "Breathy", "Iapetus": "Clear",
+    "Umbriel": "Easy-going", "Algieba": "Smooth", "Despina": "Smooth", "Erinome": "Clear",
+    "Algenib": "Gravelly", "Rasalgethi": "Informative", "Laomedeia": "Upbeat", "Achernar": "Soft",
+    "Alnilam": "Firm", "Schedar": "Even", "Gacrux": "Mature", "Pulcherrima": "Forward",
+    "Achird": "Friendly", "Zubenelgenubi": "Casual", "Vindemiatrix": "Gentle", "Sadachbia": "Lively",
+    "Sadaltager": "Knowledgeable", "Sulafat": "Warm",
+}
+
 
 @dataclass
 class AudioChunk:
@@ -88,13 +105,32 @@ class GeminiLiveSession:
         model: str | None = None,
         system_instruction: str | None = None,
         tools: list[types.Tool] | None = None,
+        voice_name: str | None = None,
     ):
         self._client = genai.Client(api_key=api_key or os.environ["GEMINI_API_KEY"])
         self._model = model or os.environ.get("GEMINI_LIVE_MODEL", DEFAULT_MODEL)
+
+        # GEMINI_VOICE_NAME (env, or the voice_name argument) selects one of
+        # PREBUILT_VOICES. Unset/None = Gemini's own default voice -- this
+        # was never explicitly chosen before this option existed. Not
+        # validated client-side against PREBUILT_VOICES (the SDK doesn't
+        # either): an unrecognized name is left for the Live API's own
+        # connect-time error rather than guessed at here, in case Google
+        # adds voices this list hasn't caught up to yet.
+        resolved_voice_name = voice_name or os.environ.get("GEMINI_VOICE_NAME")
+        speech_config = None
+        if resolved_voice_name:
+            speech_config = types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=resolved_voice_name)
+                )
+            )
+
         self._config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=system_instruction,
             tools=tools,
+            speech_config=speech_config,
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
         )

@@ -85,6 +85,52 @@ LIVEKIT_SIP_ORIGINATION_URI=sip:<vm-public-ip>:5060
 and re-run `provision_sip_trunk.py` (or update the trunk's Origination URL in
 the Twilio console directly) so Twilio forwards inbound calls here.
 
+## Agent dispatch (PROP-105 follow-up)
+
+`dispatch-rule.json` now also carries a `roomConfig.agents` entry naming
+`"propview-agent"` — this is what tells LiveKit to actually push a job to
+`../../services/orchestrator/worker.py`'s running worker when this rule
+creates a room, not just create an empty room nobody joins. The
+`agentName` here **must match `worker.py`'s `AGENT_NAME` constant
+exactly**, or real inbound calls will create a room with nobody dispatched
+into it.
+
+```json
+"roomConfig": {
+  "agents": [
+    { "agentName": "propview-agent", "metadata": "{\"tenant_id\": \"default\"}" }
+  ]
+}
+```
+
+**Multi-tenant production needs one dispatch rule per tenant, not this
+one shared file.** `metadata` here is a static string baked into the rule
+itself — it's the same for every call this *specific* rule routes, which
+is exactly right if each tenant (agency) has its own dedicated Twilio
+DID/trunk (the model `docs/AGENCY_ONBOARDING.md` already assumes): one
+dispatch rule per tenant, each with that tenant's own `tenant_id` in
+`metadata`, each presumably tied to a different inbound trunk. This
+checked-in file is the single-tenant/dev-default case, not a template to
+edit in place for a second tenant — copy it per tenant instead once
+there's more than one.
+
+**Not verified end-to-end against a real SIP call** — proven instead
+against the explicit-dispatch API (`lk.agent_dispatch.create_dispatch()`,
+not a SIP-originated room), which exercises the identical dispatch
+mechanism this rule triggers automatically; see
+`../../services/orchestrator/README.md`'s Auto-dispatch section for that
+result. One open flag, not resolved here: `setup_sip_routing.sh` invokes
+`lk sip dispatch-rule create --config <file>`, but this repo's own
+dispatch rule docs (checked 2026-10-14) describe current `lk` CLI syntax
+as `lk sip dispatch create <file>` with no `--config` flag and no hyphen
+in "dispatch" — possibly a CLI version drift between when that script was
+written and now, same category of thing already found once with
+`livekit-agents`' own API (`AgentServer` replacing an older
+`WorkerOptions` shape). Not fixed here since there's no real `lk` CLI
+installed in this environment to verify the *correct* current syntax
+against — confirm directly against whatever `lk` version is actually
+installed before relying on `setup_sip_routing.sh` as-is.
+
 ## Definition of Done (from Sprint Plan)
 
 - [ ] `livekit-server` and `livekit-sip` running on the cloud VM.

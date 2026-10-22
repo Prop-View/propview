@@ -52,6 +52,11 @@ closest embedding.
   captured, not full qualification on every call. `interactions.call_id`
   ties a durable record back to `services/orchestrator/session_store.py`'s
   ephemeral Redis session.
+- **`follow_ups`** (`008_follow_ups.sql`, a post-plan addition — see
+  `services/follow-up-manager/README.md`) — the dedup ledger for
+  `followup_scan.py`'s no-show/nurture SMS passes. One partial unique
+  index per `kind` (`appointment_id` for `'no_show'`, `lead_id` for
+  `'nurture'`) makes re-running that script safe.
 
 - **Row-Level Security** (PROP-601, `004_row_level_security.sql`) enforces
   `tenant_id` isolation on every table above, fail-closed (a connection

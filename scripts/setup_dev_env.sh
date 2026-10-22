@@ -3,6 +3,10 @@
 # dependencies installed, plus real (not .example) .env files wired
 # together correctly across services.
 #
+# Cross-platform: macOS, Linux, and Windows (via Git Bash/MSYS -- this is
+# a bash script, so plain cmd.exe/PowerShell can't run it directly, but
+# Git Bash -- already a Claude Code / Git-for-Windows dependency -- can).
+#
 # Real gaps this closes, found by actually trying to run the project
 # fresh (see the session that added this script): the default `python3`
 # on a typical Mac has none of these packages, no .env files exist
@@ -19,67 +23,133 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO_ROOT="$(pwd)"
 
-echo "== Locating Python 3.13 =="
-# Pinned to 3.13, not "python3"/"python3.11+" generically: several deps
-# here (torch, via silero-vad) lag behind the newest CPython release, and
-# 3.13 is what every package in this repo was actually verified against.
-# Homebrew's default `python3` on macOS is often newer (3.14+) and has
-# none of these packages -- using it here would silently build a venv
-# missing half of what's needed, or fail installing torch outright.
+echo "== Locating a suitable Python =="
+# Preferred: 3.13, matching what every package here was actually verified
+# against (some deps, e.g. torch via silero-vad, lag behind the newest
+# CPython release). Falls back through 3.12/3.11/3.10 -- all 90 of this
+# repo's .py files parse cleanly under 3.10, and 3.13 not being available
+# locally (common on a fresh Windows machine, or a Linux box whose distro
+# hasn't packaged it yet) shouldn't be a hard blocker. Below 3.10 is
+# untested and not accepted.
+#
+# Tries plain `pythonX.Y` on PATH first (macOS/Linux convention), then
+# falls back to the `py` launcher with a version flag (`py -3.13`), which
+# is how python.org's Windows installer registers versions -- there is
+# usually no bare `python3.13` on PATH on Windows even when 3.13 is
+# installed.
 PYTHON_BIN=""
-for candidate in python3.13 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        PYTHON_BIN="$(command -v "$candidate")"
+PYTHON_VERSION=""
+for ver in 3.13 3.12 3.11 3.10; do
+    if command -v "python$ver" >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v "python$ver")"
+        PYTHON_VERSION="$ver"
+        break
+    fi
+    if command -v py >/dev/null 2>&1 && py "-$ver" --version >/dev/null 2>&1; then
+        PYTHON_BIN="py -$ver"
+        PYTHON_VERSION="$ver"
         break
     fi
 done
 if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: no python3.13 found. Install it (e.g. 'brew install python@3.13')" >&2
-    echo "       or from python.org, then re-run this script." >&2
+    echo "ERROR: no Python 3.10-3.13 found." >&2
+    echo "       macOS:   brew install python@3.13" >&2
+    echo "       Windows: install from python.org (any of 3.10-3.13), or 'winget install Python.Python.3.13'" >&2
+    echo "       Linux:   use your distro's package manager, or pyenv" >&2
     exit 1
 fi
-echo "Using: $PYTHON_BIN ($("$PYTHON_BIN" --version))"
+echo "Using: $PYTHON_BIN ($($PYTHON_BIN --version))"
+if [ "$PYTHON_VERSION" != "3.13" ]; then
+    echo "NOTE: this repo was originally verified against 3.13; using $PYTHON_VERSION instead." >&2
+    echo "      Everything is expected to work (all source files parse under 3.10+), but if a" >&2
+    echo "      dependency install fails, installing 3.13 alongside is the first thing to try." >&2
+fi
 
 echo
 echo "== Creating venv (.venv) =="
 if [ ! -d .venv ]; then
-    "$PYTHON_BIN" -m venv .venv
+    $PYTHON_BIN -m venv .venv
     echo "Created .venv"
 else
     echo ".venv already exists, reusing it"
 fi
-VENV_PIP="$REPO_ROOT/.venv/bin/pip"
-VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 
-echo
-echo "== Installing dependencies (every service's requirements.txt) =="
+# Windows venvs put executables in Scripts/ with a .exe suffix; POSIX
+# venvs use bin/ with no suffix. Detect which one this venv actually has
+# rather than assuming from the host OS -- more robust under Git Bash,
+# where `uname` says MINGW/MSYS but paths are still Windows-shaped.
+if [ -f .venv/Scripts/python.exe ]; then
+    VENV_PYTHON="$REPO_ROOT/.venv/Scripts/python.exe"
+    ACTIVATE_HINT="source .venv/Scripts/activate   # Git Bash; or .venv\\Scripts\\activate.bat in cmd.exe, .venv\\Scripts\\Activate.ps1 in PowerShell"
+else
+    VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+    ACTIVATE_HINT="source .venv/bin/activate"
+fi
+
+# NOTE on a machine-wide C:\ProgramData\pip\pip.ini some Windows dev
+# machines have (left over from an unrelated CUDA/NVIDIA package setup):
+# it can add `extra-index-url = https://pypi.ngc.nvidia.com`. If that
+# host doesn't resolve on the current network, EVERY package install
+# below retries against it (up to --retries times) before falling
+# through to the real PyPI -- this makes the whole script much slower
+# but does not break it (verified: this is the exact config already
+# present when this repo's admin-api/tool-router venvs were set up
+# successfully in an earlier session -- pip does fall through correctly,
+# it just costs real time doing so). `--isolated` looks like the fix but
+# isn't: verified directly that it only suppresses *user*-level pip
+# config and env vars, not this *global*/machine-wide file -- its
+# extra-index-url is still visible in `pip config list --isolated` and
+# still gets tried. The only real fix is removing/editing that file
+# yourself (outside this repo's scope to do automatically, since other
+# projects on the same machine may depend on it) -- ask before touching
+# C:\ProgramData\pip\pip.ini.
+#
 # --retries 10 (pip's default is 5): seen this environment's DNS
-# intermittently fail to resolve files.pythonhosted.org specifically
-# (the wheel-download CDN) while pypi.org itself resolves fine -- real,
-# reproduced twice, documented in scripts/README.md. Doesn't hurt a
-# healthy network, gives a flaky one more chances.
-"$VENV_PIP" install -q --retries 10 --upgrade pip
-
-install_with_retry() {
-    local req_file="$1"
+# intermittently fail to resolve pypi.org / files.pythonhosted.org for a
+# few seconds at a time while the network is otherwise healthy -- real,
+# reproduced more than once, documented in scripts/README.md. This outer
+# 3-attempt/5s-backoff wrapper is a second layer on top of that: pip's
+# own --retries burns through all 10 attempts in well under 5 seconds
+# (each retry backs off in fractions of a second), which is often shorter
+# than the blip itself. Applied to *every* pip invocation below,
+# including the pip self-upgrade -- a DNS blip on that first command used
+# to kill the whole script before it ever reached a single dependency.
+#
+# Invoked as `python -m pip`, not the `pip`/`pip.exe` executable directly:
+# on Windows, pip upgrading itself via its own .exe fails with
+# "WinError 5: Access is denied" -- Windows won't let a running
+# executable overwrite itself. Going through python -m avoids that
+# entirely (python.exe isn't the file being replaced), and works
+# identically on macOS/Linux too. Found by actually running this on
+# Windows, not assumed.
+pip_install_with_retry() {
+    local label="$1"
+    shift
     local attempt
     for attempt in 1 2 3; do
-        if "$VENV_PIP" install -q --retries 10 -r "$req_file"; then
+        if "$VENV_PYTHON" -m pip install -q --retries 10 "$@"; then
             return 0
         fi
-        echo "  attempt $attempt failed for ${req_file#"$REPO_ROOT"/}, retrying in 5s..." >&2
+        echo "  attempt $attempt failed for $label, retrying in 5s..." >&2
         sleep 5
     done
-    echo "  giving up on ${req_file#"$REPO_ROOT"/} after 3 attempts -- see scripts/README.md's" >&2
-    echo "  'pip install' verification note if this is a files.pythonhosted.org DNS issue." >&2
+    echo "  giving up on $label after 3 attempts -- see scripts/README.md's" >&2
+    echo "  'pip install' verification note if this is a DNS flakiness issue." >&2
     return 1
 }
 
+echo
+echo "== Upgrading pip =="
+pip_install_with_retry "pip itself" --upgrade pip
+
+echo
+echo "== Installing dependencies (every service's requirements.txt) =="
 # find, not a hardcoded list -- so a new service's requirements.txt gets
 # picked up automatically without this script needing an update.
 while IFS= read -r req_file; do
-    echo "  installing: ${req_file#"$REPO_ROOT"/}"
-    install_with_retry "$req_file"
+    label="${req_file#"$REPO_ROOT"/}"
+    echo "  installing: $label"
+    pip_install_with_retry "$label" -r "$req_file"
 done < <(find "$REPO_ROOT" -name "requirements.txt" -not -path "*/.venv/*" | sort)
 
 echo
@@ -133,13 +203,44 @@ setup_env_file() {
         return
     fi
     cp "$dir/.env.example" "$env_file"
-    if [ -n "$GEMINI_KEY" ]; then
-        # BSD sed (macOS) needs the '' after -i; this repo's dev machine is macOS.
-        sed -i '' "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$GEMINI_KEY|" "$env_file" 2>/dev/null || true
-    fi
-    sed -i '' "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$ENCRYPTION_KEY_VALUE|" "$env_file" 2>/dev/null || true
-    sed -i '' "s|^INTERNAL_SERVICE_TOKEN=.*|INTERNAL_SERVICE_TOKEN=$INTERNAL_SERVICE_TOKEN_VALUE|" "$env_file" 2>/dev/null || true
-    sed -i '' "s|^PLATFORM_OPERATOR_TOKEN=.*|PLATFORM_OPERATOR_TOKEN=$PLATFORM_OPERATOR_TOKEN_VALUE|" "$env_file" 2>/dev/null || true
+    # Substitution via Python, not sed: BSD sed (macOS) needs `-i ''`
+    # while GNU sed (Linux, and Git Bash on Windows -- MSYS ships GNU
+    # sed) needs `-i` with no separate empty-string argument. The two
+    # are incompatible with each other's syntax, and the previous
+    # version of this script used the BSD form with `|| true`, which
+    # made it FAIL SILENTLY on Windows/Linux: the .env file was created
+    # from the .example but the shared secrets were never substituted,
+    # leaving e.g. `ENCRYPTION_KEY=` empty and every service refusing to
+    # authenticate at runtime with no clear reason why. One Python
+    # implementation works identically on every platform this script
+    # supports, and Python is already a hard requirement at this point.
+    "$VENV_PYTHON" - "$env_file" "$GEMINI_KEY" "$ENCRYPTION_KEY_VALUE" "$INTERNAL_SERVICE_TOKEN_VALUE" "$PLATFORM_OPERATOR_TOKEN_VALUE" <<'PYEOF'
+import re
+import sys
+
+env_file, gemini_key, encryption_key, internal_token, platform_token = sys.argv[1:6]
+
+substitutions = {}
+if gemini_key:
+    substitutions["GEMINI_API_KEY"] = gemini_key
+substitutions["ENCRYPTION_KEY"] = encryption_key
+substitutions["INTERNAL_SERVICE_TOKEN"] = internal_token
+substitutions["PLATFORM_OPERATOR_TOKEN"] = platform_token
+
+with open(env_file, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+
+out = []
+for line in lines:
+    m = re.match(r"^([A-Z_][A-Z0-9_]*)=", line)
+    if m and m.group(1) in substitutions:
+        out.append(f"{m.group(1)}={substitutions[m.group(1)]}\n")
+    else:
+        out.append(line)
+
+with open(env_file, "w", encoding="utf-8") as f:
+    f.writelines(out)
+PYEOF
     echo "  created $env_file"
 }
 
@@ -171,7 +272,7 @@ echo "    needs one degrades gracefully without it (see each service's own READM
 echo "    'Not live-verified' section for exactly what that means for that feature)."
 echo
 echo "To run something:"
-echo "  source .venv/bin/activate"
+echo "  $ACTIVATE_HINT"
 echo "  # then follow docs/AGENCY_ONBOARDING.md or any service's own README"
 echo
 echo "Quickest way to confirm it all actually works (no mic, no phone, no extra accounts --"

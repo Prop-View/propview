@@ -67,6 +67,17 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
   for building these from the Tool Router's `/tools/schema`.
 - `send_text()` exists for testing tool-calling/text turns without a
   mic — not used in the real call path (that's always `send_audio`).
+- `voice_name` (constructor arg, or `GEMINI_VOICE_NAME` env var) selects
+  one of Gemini's 30 prebuilt voices — see `PREBUILT_VOICES` in
+  `gemini_live_client.py` for the full list with each voice's one-word
+  character (`Kore`=Firm, `Puck`=Upbeat, `Sulafat`=Warm, ...). Unset =
+  Gemini's own default, which is what every prior call in this project
+  has used — nobody had actually tried an alternative before this option
+  existed. **Not live-verified**: builds the right `SpeechConfig` (checked
+  directly — see the constructor), but no real `GEMINI_API_KEY` was
+  available in this environment to confirm the Live API actually honors
+  it end-to-end. Try a few voice names against `test_mic_call.py` with a
+  real key before picking one for production.
 - `TranscriptChunk(speaker, text, finished)` — both directions transcribed
   automatically (`input_audio_transcription`/`output_audio_transcription`
   always enabled). Per Gemini's own docs, transcription "is independent

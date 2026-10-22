@@ -62,3 +62,26 @@ def build_appointment_confirmation(address: str, scheduled_at_local: str, agency
     agency-display-name column -- only calendar credentials). Callers with
     a real agency name available should pass it explicitly."""
     return f"{agency_name}: your site visit at {address} is confirmed for {scheduled_at_local}. Reply STOP to opt out."
+
+
+def build_no_show_followup(agency_name: str = "Your agent") -> str:
+    """Sent once per missed appointment (../follow-up-manager/followup_scan.py).
+    Deliberately doesn't repeat the missed time/address the way
+    build_appointment_confirmation does -- that slot is no longer
+    actionable by the time this fires; the goal is just to re-open the
+    conversation, not remind the caller what they missed."""
+    return (
+        f"{agency_name}: we missed you at your scheduled site visit. "
+        f"Still interested? Call us back or reply to this message to rebook. "
+        f"Reply STOP to opt out."
+    )
+
+
+def build_nurture_followup(agency_name: str = "Your agent") -> str:
+    """Sent once per lead who called in but never booked a site visit
+    (../follow-up-manager/followup_scan.py)."""
+    return (
+        f"{agency_name}: still looking for your next property? "
+        f"We're here whenever you're ready to schedule a visit. "
+        f"Reply STOP to opt out."
+    )

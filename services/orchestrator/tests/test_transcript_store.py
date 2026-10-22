@@ -7,6 +7,7 @@ INSERT.
 Run: python -m pytest tests/test_transcript_store.py -v
 """
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -18,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from transcript_store import save_interaction
 
-DATABASE_URL = "postgresql://propview_app:devpassword@localhost/propview_dev"
+# os.environ.get, not a hardcoded literal -- see test_tenant_branding.py's
+# identical comment. Same bug, same fix: this used to ignore DATABASE_URL
+# entirely and always hit the default port 5432.
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://propview_app:devpassword@localhost/propview_dev")
 TENANT_ID = "default"
 
 

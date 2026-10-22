@@ -14,3 +14,6 @@ services/audio-pipeline/*.dylib
 # local dev artifacts
 dump.rdb
 .claude/
+.vscode/
+.mcp.json
+.tools/

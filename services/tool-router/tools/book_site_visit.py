@@ -87,7 +87,15 @@ async def book_site_visit(
     confirmation_sent = False
     try:
         address = f"property #{args.property_id}" if args.property_id else "the property"
-        body = build_appointment_confirmation(address, slot.start.strftime("%A, %B %-d at %-I:%M %p"))
+        # No-leading-zero day/hour (%-d/%-I) are a glibc strftime extension --
+        # they raise ValueError("Invalid format string") on Windows, which
+        # main.py's broad `except ValueError` then reports as a misleading
+        # 422 on every booking. Built manually instead so this works
+        # identically on every platform. Found by actually running the
+        # booking test suite on Windows, not assumed.
+        hour_12 = slot.start.strftime("%I:%M %p").lstrip("0")
+        formatted_time = f"{slot.start.strftime('%A, %B')} {slot.start.day} at {hour_12}"
+        body = build_appointment_confirmation(address, formatted_time)
         await send_sms(caller_phone_number, body)
         confirmation_sent = True
         await connection.execute("UPDATE appointments SET confirmation_sms_sent_at = now() WHERE id = $1", appointment_id)

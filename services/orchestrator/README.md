@@ -194,16 +194,25 @@ cp .env.example .env   # fill in GEMINI_API_KEY; LiveKit/Redis defaults match lo
 
 ## Running a call
 
+**Two entrypoints, sharing one implementation.** `call_session.py` holds
+every bit of actual call-handling setup (session store, Tool Router
+client, per-tenant branding, Gemini session, VAD, fallback factory, the
+`CallOrchestrator` itself, and waiting for the call to end) — `main.py`
+and `worker.py` differ only in *how a room gets connected* and *how
+`tenant_id` gets resolved*, nothing else. Changing call behavior means
+changing `call_session.py` once, not two places that can quietly drift
+apart.
+
+### Manual — one room, by hand
+
 ```bash
 python main.py <room-name>
 ```
 
 Connects to `<room-name>` as the agent, bridges it to Gemini, and runs
-until the caller disconnects (or Ctrl+C). This is the actual process a
-deployed VM would run — not yet wired to auto-dispatch on every new
-inbound SIP call (that needs LiveKit's Agent Worker / job-dispatch system,
-a separate step once PROP-102 is deployed and real calls exist to
-dispatch against); for now it's invoked with an explicit room name.
+until the caller disconnects (or Ctrl+C). Useful for isolating one
+specific test call without a real SIP trunk or dispatch rule in the way.
+`TENANT_ID` (env var, default `"default"`) is fixed for the whole process.
 
 **Verified live end-to-end** 2026-09-03 with real LiveKit, real Redis, and
 a real Gemini API key (no telephony — a synthetic caller participant
@@ -211,7 +220,54 @@ stood in for the phone leg): the process joined the room, created its
 Redis session, subscribed to the caller's audio track, and — when the
 caller disconnected — cleanly cancelled its forwarding tasks, closed the
 Gemini session, deleted the Redis session, disconnected from the room, and
-exited.
+exited. **Re-verified 2026-10-14 after the call_session.py refactor** —
+identical result, 54/54 unit tests still pass.
+
+### Auto-dispatch — the real production path (PROP-105 follow-up)
+
+```bash
+python worker.py dev
+```
+
+A long-running [LiveKit Agents](https://docs.livekit.io/agents/) worker
+that registers itself with the LiveKit server and gets a job dispatched
+to it automatically for every new inbound call — nobody runs this by hand
+per call. Needs `livekit-agents` (in `requirements.txt`, a separate
+package from `livekit`/`livekit-api` this codebase already used directly).
+
+**Explicit dispatch, not automatic**: the worker registers with a
+non-empty `agent_name` (`"propview-agent"`), which LiveKit's own docs
+recommend over "dispatch to every new room" for anything beyond
+prototyping. Something has to explicitly request this agent for a room —
+for real inbound SIP calls, that's `../../infra/livekit/dispatch-rule.json`'s
+`roomConfig.agents` entry, which must name the exact same agent name.
+
+**Per-tenant resolution, not a fixed env var**: a dispatch job carries a
+freeform metadata string (`ctx.job.metadata`, set by whichever dispatch
+rule routed the call here), read as JSON and expected to carry
+`{"tenant_id": "..."}`. A real multi-tenant deployment needs one dispatch
+rule per tenant, each carrying that tenant's own id — see
+`../../infra/livekit/README.md`. Falls back to `TENANT_ID`'s default
+(`"default"`) if metadata is missing or isn't valid JSON, rather than
+crashing the job.
+
+**API verified directly against the installed package, not assumed**:
+the current shape is `AgentServer` + `@server.rtc_session(agent_name=...)`
++ `agents.cli.run_app(server)` — checked because older tutorials/docs
+show a previous-generation `WorkerOptions(entrypoint_fnc=..., request_fnc=...)`
+shape instead, which would not have worked against the version actually
+installed here.
+
+**Live-verified 2026-10-14**, no real telephony needed: a synthetic caller
+joined a room and published audio; `lk.agent_dispatch.create_dispatch()`
+requested `"propview-agent"` for that room with
+`metadata='{"tenant_id": "dispatch-proof-tenant"}'` (standing in for what
+a real SIP dispatch rule does automatically); the running `worker.py`
+process picked up the job **with no one running `main.py` by hand** and
+logged `Dispatched into room 'dispatch-proof-room' for tenant
+'dispatch-proof-tenant'` — confirmed end to end via the structured
+`call_started`/`caller_audio_subscribed`/`call_ended` telemetry, all
+three correctly tagged with the dispatched tenant, not the default.
 
 For local Redis: `brew install redis && brew services start redis` (or
 `redis-server` directly). See `../../infra/redis/README.md` for cloud
@@ -255,6 +311,17 @@ real recorded-speech WAV as the "caller," and a fake Gemini that never
 stops talking on its own (isolates the predictive path). **Verified
 passing** 2026-09-04 — see the barge-in section above for the exact
 result.
+
+Auto-dispatch (`worker.py`) has no pytest suite — proving "does a job
+really get pushed to a running worker automatically" needs a live LiveKit
+server + a live worker process + a real dispatch request, not something
+a unit test fixture can fake meaningfully. Verified instead with a
+one-off script: start `livekit-server --dev`, start `worker.py dev`, have
+a synthetic caller join a room and call
+`lk.agent_dispatch.create_dispatch(CreateAgentDispatchRequest(agent_name="propview-agent", room=..., metadata=...))`,
+and confirm a participant auto-joins within 15s with the correct
+tenant_id showing up in the dispatched job's logs. See the Auto-dispatch
+section above for the full result.
 
 ## Definition of Done (from Sprint Plan)
 
@@ -306,7 +373,18 @@ result.
       itself is unit-tested but not yet exercised against a real call.
 - [ ] OTLP export to a real collector/Grafana once one exists (PROP-603).
 - [ ] Verified with a real phone call once PROP-101/102 are deployed.
-- [ ] Auto-dispatch on new inbound calls (currently takes an explicit room name).
+- [x] **Auto-dispatch on new inbound calls** (`worker.py`, 2026-10-14) — a
+      LiveKit Agents worker (`livekit-agents`, registered with
+      `agent_name="propview-agent"`) gets a job dispatched to it
+      automatically; `main.py`'s explicit-room-name path is kept
+      alongside it for manual single-call testing, not replaced. All
+      shared call-handling logic extracted to `call_session.py` so the
+      two entrypoints can't drift apart. Live-verified end to end (see
+      the Auto-dispatch section above) — not yet exercised against a real
+      SIP-originated call, since that needs PROP-101/102 deployed; the
+      explicit-dispatch API used to prove this stands in for what a real
+      SIP dispatch rule (`infra/livekit/dispatch-rule.json`, also updated)
+      will trigger automatically once telephony exists.
 - [x] PROP-204: barge-in truncates the interrupted speaker's transcript at
       chunk granularity (`_flush_transcript_buffer`, called from both the
       VAP predictive and Gemini reactive interrupt paths) and pushes it to

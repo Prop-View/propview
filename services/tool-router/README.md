@@ -195,6 +195,18 @@ loop against the configured 120/10s limit returned exactly 120×200 then
 5×429 — the limit fires at precisely the configured threshold. Full
 suite total is now 31/31.
 
+**2026-10-18**: `update_lead_qualification.py` had its own separate copy
+of the contact/lead creation logic instead of calling
+`tools/_lead_context.py`'s `ensure_contact_and_lead` — that helper's own
+docstring claimed both tools already shared it, but only `book_site_visit.py`
+actually did. Consolidated onto the shared helper (also removing a
+defensive fallback branch that `ensure_contact_and_lead`'s own tenant
+validation makes unreachable). Behavior-preserving: all 5 existing
+`update_lead_qualification` tests still pass unchanged, full suite still
+31/31 (was missing `pytest-asyncio` from `requirements.txt` — every other
+service with async tests already lists it; added, since without it
+`test_rate_limit.py` fails to even collect).
+
 ## Definition of Done (from Sprint Plan)
 
 - [x] FastAPI Tool Router service handling function-call payloads (PROP-303).

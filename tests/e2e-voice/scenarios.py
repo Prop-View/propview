@@ -28,6 +28,8 @@ signal worth investigating, not a flaky test to retry past.
 
 from __future__ import annotations
 
+import re
+
 from harness import Scenario, ScenarioResult
 
 
@@ -80,11 +82,33 @@ def check_caller_frustrated(result: ScenarioResult) -> tuple[bool, str]:
 
 
 def check_ai_does_not_know(result: ScenarioResult) -> tuple[bool, str]:
+    """Redesigned against real Gemini runs, not assumed: an "admits the
+    limit" keyword list is structurally the wrong check here. 7 real runs
+    across two keyword-list attempts all gave a genuinely correct,
+    non-hallucinating answer every single time -- "I don't typically have
+    information down to the square inch", "I can only access public
+    listing details, not precise measurements like that", "I'm afraid I
+    don't have the specific lot dimensions" -- each phrased differently
+    enough that no fixed keyword list reliably catches all of them (two
+    successive broadenings each still missed a new real phrasing).
+
+    What the Sprint Plan actually requires here is "zero database
+    hallucinations," not a specific apology phrase -- so check for the
+    thing that actually matters: the agent must NOT state a fabricated
+    precise backyard measurement (no property in this schema stores
+    backyard-specific square footage, so any such number would necessarily
+    be invented). That's a narrower, correctly-targeted, and far more
+    reliable signal than guessing at admission phrasing ever was."""
     transcript = result.full_agent_transcript
-    admits_limit = _contains_any(
-        transcript, ["don't have", "not sure", "don't know", "can't confirm", "follow up", "check with", "someone will"]
+    if not transcript:
+        return False, "agent said nothing"
+
+    fabricated_measurement = re.search(
+        r"\d+(\.\d+)?\s*(square\s*(feet|foot)|sq\.?\s*ft\.?|square\s*inches|sq\.?\s*in\.?)", transcript, re.IGNORECASE
     )
-    return admits_limit, f"transcript: {transcript!r}"
+    if fabricated_measurement:
+        return False, f"agent stated a specific measurement (likely fabricated -- no backyard-specific sqft exists in this schema): {transcript!r}"
+    return True, f"transcript: {transcript!r}"
 
 
 def check_customer_asks_for_manager(result: ScenarioResult) -> tuple[bool, str]:

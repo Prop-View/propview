@@ -16,7 +16,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import sms_dispatch
-from sms_dispatch import SmsDispatchError, build_appointment_confirmation, send_sms, send_whatsapp
+from sms_dispatch import (
+    SmsDispatchError,
+    build_appointment_confirmation,
+    build_no_show_followup,
+    build_nurture_followup,
+    send_sms,
+    send_whatsapp,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -79,3 +86,15 @@ def test_build_appointment_confirmation_includes_key_details():
 def test_build_appointment_confirmation_default_agency_name():
     body = build_appointment_confirmation("123 Oak St", "Tuesday at 2:00 PM")
     assert "Your agent" in body
+
+
+def test_build_no_show_followup_includes_agency_and_opt_out():
+    body = build_no_show_followup(agency_name="Austin Realty")
+    assert "Austin Realty" in body
+    assert "STOP" in body
+
+
+def test_build_nurture_followup_includes_agency_and_opt_out():
+    body = build_nurture_followup(agency_name="Austin Realty")
+    assert "Austin Realty" in body
+    assert "STOP" in body

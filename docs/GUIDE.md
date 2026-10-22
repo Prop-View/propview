@@ -86,6 +86,7 @@ secrets).
 |---|---|---|
 | `GEMINI_API_KEY` | **Yes** | See 2.1. |
 | `GEMINI_LIVE_MODEL` | No | Defaults to `gemini-3.1-flash-live-preview`. |
+| `GEMINI_VOICE_NAME` | No | Picks one of Gemini's 30 prebuilt voices (e.g. `Kore`, `Puck`, `Sulafat`). Unset = Gemini's own default. Full list with each voice's character in `gemini_live_client.py`'s `PREBUILT_VOICES`. |
 
 **`services/orchestrator/.env`** — the call-handling process (`main.py`)
 | Var | Required? | Notes |
