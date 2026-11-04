@@ -2,12 +2,18 @@
 PROP-602: Tenant Admin API -- upload listings and calendar credentials
 per tenant. Builds on PROP-601's RLS: every write goes through
 tenant_connection() so a tenant can only ever write its own rows.
+
+Dashboard read endpoints (properties, leads, calls, appointments,
+analytics) added to serve the React frontend -- same tenant auth,
+same RLS isolation, read-only queries.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -15,7 +21,8 @@ from dotenv import load_dotenv
 load_dotenv()  # real gap found 2026-09-09: this was never called here --
 # see services/tool-router/main.py's identical fix for the full story.
 
-from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from auth import generate_api_key, hash_key, require_platform_token, require_tenant_auth  # noqa: E402
@@ -23,6 +30,16 @@ from crypto import decrypt, encrypt  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
 from rate_limit import PROVISION_LIMIT, rate_limited  # noqa: E402
 from redis_client import close_redis_client  # noqa: E402
+
+
+def _row_to_dict(row) -> dict:
+    out = dict(row)
+    for key, value in out.items():
+        if isinstance(value, Decimal):
+            out[key] = float(value)
+        elif key == "amenities" and isinstance(value, str):
+            out[key] = json.loads(value)
+    return out
 
 
 class ListingUpload(BaseModel):
@@ -63,6 +80,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post(
@@ -203,6 +228,283 @@ async def get_calendar_credentials(tenant_id: str):
     return {
         "provider": row["calendar_provider"],
         "credentials": json.loads(decrypt(row["encrypted_calendar_credentials"])),
+    }
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/properties",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def list_properties(
+    tenant_id: str,
+    status: str | None = None,
+    property_type: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    conditions = ["tenant_id = $1"]
+    params: list = [tenant_id]
+    if status:
+        params.append(status)
+        conditions.append(f"status = ${len(params)}")
+    if property_type:
+        params.append(property_type)
+        conditions.append(f"property_type = ${len(params)}")
+    params.extend([limit, offset])
+    query = f"""
+        SELECT id, address, city, state, property_type, status, beds, baths,
+               sqft, price, hoa_fee, listing_agent, amenities, created_at
+        FROM properties
+        WHERE {' AND '.join(conditions)}
+        ORDER BY created_at DESC
+        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+    """
+    async with tenant_connection(tenant_id) as conn:
+        rows = await conn.fetch(query, *params)
+        count = await conn.fetchval(
+            f"SELECT count(*) FROM properties WHERE {' AND '.join(conditions)}",
+            *params[:-2],
+        )
+    return {"items": [_row_to_dict(r) for r in rows], "total": count}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/leads",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def list_leads(
+    tenant_id: str,
+    priority: str | None = None,
+    status: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    conditions = ["l.tenant_id = $1"]
+    params: list = [tenant_id]
+    if priority:
+        params.append(priority)
+        conditions.append(f"l.priority = ${len(params)}")
+    if status:
+        params.append(status)
+        conditions.append(f"l.status = ${len(params)}")
+    params.extend([limit, offset])
+    query = f"""
+        SELECT l.id, l.contact_id, c.full_name, c.phone_number, c.email,
+               l.intent, l.budget_min, l.budget_max, l.timeline,
+               l.decision_maker, l.priority, l.status, l.property_id,
+               l.created_at, l.updated_at
+        FROM leads l
+        JOIN contacts c ON c.id = l.contact_id AND c.tenant_id = l.tenant_id
+        WHERE {' AND '.join(conditions)}
+        ORDER BY l.updated_at DESC
+        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+    """
+    async with tenant_connection(tenant_id) as conn:
+        rows = await conn.fetch(query, *params)
+        count = await conn.fetchval(
+            f"SELECT count(*) FROM leads l WHERE {' AND '.join(conditions[:1] + conditions[1:])}",
+            *params[:-2],
+        )
+    return {"items": [_row_to_dict(r) for r in rows], "total": count}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/appointments",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def list_appointments(
+    tenant_id: str,
+    status: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    conditions = ["a.tenant_id = $1"]
+    params: list = [tenant_id]
+    if status:
+        params.append(status)
+        conditions.append(f"a.status = ${len(params)}")
+    params.extend([limit, offset])
+    query = f"""
+        SELECT a.id, a.lead_id, a.property_id, a.scheduled_at, a.status,
+               a.agent_name, a.confirmation_sms_sent_at, a.created_at,
+               c.full_name AS lead_name,
+               p.address AS property_address
+        FROM appointments a
+        JOIN leads l ON l.id = a.lead_id AND l.tenant_id = a.tenant_id
+        JOIN contacts c ON c.id = l.contact_id AND c.tenant_id = a.tenant_id
+        LEFT JOIN properties p ON p.id = a.property_id AND p.tenant_id = a.tenant_id
+        WHERE {' AND '.join(conditions)}
+        ORDER BY a.scheduled_at DESC
+        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+    """
+    async with tenant_connection(tenant_id) as conn:
+        rows = await conn.fetch(query, *params)
+        count = await conn.fetchval(
+            f"SELECT count(*) FROM appointments a WHERE {' AND '.join(conditions)}",
+            *params[:-2],
+        )
+    return {"items": [_row_to_dict(r) for r in rows], "total": count}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/calls",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def list_calls(
+    tenant_id: str,
+    outcome: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    conditions = ["i.tenant_id = $1"]
+    params: list = [tenant_id]
+    if outcome:
+        params.append(outcome)
+        conditions.append(f"ca.outcome = ${len(params)}")
+    params.extend([limit, offset])
+    query = f"""
+        SELECT i.id, i.call_id, i.channel, i.duration_seconds, i.outcome,
+               i.created_at,
+               c.full_name AS caller_name, c.phone_number AS caller_phone,
+               ca.total_turns, ca.tools_used, ca.outcome AS analytics_outcome,
+               ca.barge_in_count
+        FROM interactions i
+        LEFT JOIN contacts c ON c.id = i.contact_id AND c.tenant_id = i.tenant_id
+        LEFT JOIN call_analytics ca ON ca.call_id = i.call_id AND ca.tenant_id = i.tenant_id
+        WHERE {' AND '.join(conditions)}
+        ORDER BY i.created_at DESC
+        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+    """
+    async with tenant_connection(tenant_id) as conn:
+        rows = await conn.fetch(query, *params)
+        count = await conn.fetchval(
+            f"""SELECT count(*) FROM interactions i
+                LEFT JOIN call_analytics ca ON ca.call_id = i.call_id AND ca.tenant_id = i.tenant_id
+                WHERE {' AND '.join(conditions)}""",
+            *params[:-2],
+        )
+    return {"items": [_row_to_dict(r) for r in rows], "total": count}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/calls/{call_id}",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def get_call_detail(tenant_id: str, call_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        interaction = await conn.fetchrow(
+            """SELECT i.*, c.full_name AS caller_name, c.phone_number AS caller_phone
+               FROM interactions i
+               LEFT JOIN contacts c ON c.id = i.contact_id AND c.tenant_id = i.tenant_id
+               WHERE i.call_id = $1""",
+            call_id,
+        )
+        if not interaction:
+            raise HTTPException(status_code=404, detail="Call not found")
+
+        turns = await conn.fetch(
+            "SELECT * FROM conversation_turns WHERE call_id = $1 ORDER BY turn_index",
+            call_id,
+        )
+        tools = await conn.fetch(
+            "SELECT * FROM tool_invocations WHERE call_id = $1 ORDER BY created_at",
+            call_id,
+        )
+        analytics = await conn.fetchrow(
+            "SELECT * FROM call_analytics WHERE call_id = $1", call_id,
+        )
+    return {
+        "interaction": _row_to_dict(interaction),
+        "turns": [_row_to_dict(t) for t in turns],
+        "tool_invocations": [_row_to_dict(t) for t in tools],
+        "analytics": _row_to_dict(analytics) if analytics else None,
+    }
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/stats",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def get_dashboard_stats(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        total_calls = await conn.fetchval(
+            "SELECT count(*) FROM interactions WHERE tenant_id = $1", tenant_id
+        )
+        calls_today = await conn.fetchval(
+            "SELECT count(*) FROM interactions WHERE tenant_id = $1 AND created_at >= CURRENT_DATE",
+            tenant_id,
+        )
+        avg_duration = await conn.fetchval(
+            "SELECT coalesce(avg(duration_seconds), 0) FROM interactions WHERE tenant_id = $1",
+            tenant_id,
+        )
+        total_properties = await conn.fetchval(
+            "SELECT count(*) FROM properties WHERE tenant_id = $1", tenant_id
+        )
+        active_leads = await conn.fetchval(
+            "SELECT count(*) FROM leads WHERE tenant_id = $1 AND status NOT IN ('closed_won', 'closed_lost')",
+            tenant_id,
+        )
+        hot_leads = await conn.fetchval(
+            "SELECT count(*) FROM leads WHERE tenant_id = $1 AND priority = 'high' AND status NOT IN ('closed_won', 'closed_lost')",
+            tenant_id,
+        )
+        appointments_this_week = await conn.fetchval(
+            """SELECT count(*) FROM appointments
+               WHERE tenant_id = $1 AND scheduled_at >= date_trunc('week', CURRENT_DATE)
+               AND scheduled_at < date_trunc('week', CURRENT_DATE) + interval '7 days'""",
+            tenant_id,
+        )
+        lead_priority_counts = await conn.fetch(
+            """SELECT priority, count(*)::int AS count FROM leads
+               WHERE tenant_id = $1 AND status NOT IN ('closed_won', 'closed_lost')
+               GROUP BY priority""",
+            tenant_id,
+        )
+        outcome_counts = await conn.fetch(
+            """SELECT outcome, count(*)::int AS count FROM call_analytics
+               WHERE tenant_id = $1 GROUP BY outcome""",
+            tenant_id,
+        )
+        daily_calls = await conn.fetch(
+            """SELECT created_at::date AS date, count(*)::int AS calls
+               FROM interactions WHERE tenant_id = $1
+               AND created_at >= CURRENT_DATE - interval '7 days'
+               GROUP BY created_at::date ORDER BY date""",
+            tenant_id,
+        )
+        daily_bookings = await conn.fetch(
+            """SELECT scheduled_at::date AS date, count(*)::int AS booked
+               FROM appointments WHERE tenant_id = $1
+               AND scheduled_at >= CURRENT_DATE - interval '7 days'
+               GROUP BY scheduled_at::date ORDER BY date""",
+            tenant_id,
+        )
+        tool_usage = await conn.fetch(
+            """SELECT tool_name, count(*)::int AS count
+               FROM tool_invocations WHERE tenant_id = $1
+               GROUP BY tool_name ORDER BY count DESC""",
+            tenant_id,
+        )
+        booked_count = await conn.fetchval(
+            "SELECT count(*) FROM call_analytics WHERE tenant_id = $1 AND outcome = 'booked'",
+            tenant_id,
+        )
+    conversion_rate = round((booked_count / total_calls * 100), 1) if total_calls > 0 else 0
+    return {
+        "total_calls": total_calls,
+        "calls_today": calls_today,
+        "avg_duration_seconds": float(avg_duration),
+        "conversion_rate": conversion_rate,
+        "total_properties": total_properties,
+        "active_leads": active_leads,
+        "hot_leads": hot_leads,
+        "appointments_this_week": appointments_this_week,
+        "lead_priority_counts": {r["priority"]: r["count"] for r in lead_priority_counts if r["priority"]},
+        "outcome_counts": {r["outcome"]: r["count"] for r in outcome_counts if r["outcome"]},
+        "daily_calls": [{"date": str(r["date"]), "calls": r["calls"]} for r in daily_calls],
+        "daily_bookings": [{"date": str(r["date"]), "booked": r["booked"]} for r in daily_bookings],
+        "tool_usage": [{"tool_name": r["tool_name"], "count": r["count"]} for r in tool_usage],
     }
 
 
