@@ -57,6 +57,12 @@ closest embedding.
   `followup_scan.py`'s no-show/nurture SMS passes. One partial unique
   index per `kind` (`appointment_id` for `'no_show'`, `lead_id` for
   `'nurture'`) makes re-running that script safe.
+- **Structured conversation data** (`009_conversation_store.sql`) stores
+  per-turn transcripts, tool invocations, and call analytics, each
+  protected by RLS. `010_conversation_outcome_values.sql` keeps only
+  outcomes the orchestrator can resolve (`booked`, `qualified`,
+  `transferred`, `unknown`); any legacy `dropped`/`nurture` values are
+  normalized to `unknown`.
 
 - **Row-Level Security** (PROP-601, `004_row_level_security.sql`) enforces
   `tenant_id` isolation on every table above, fail-closed (a connection

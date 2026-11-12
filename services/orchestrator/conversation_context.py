@@ -56,9 +56,21 @@ class ConversationContextStore:
         self._redis = redis.from_url(redis_url, decode_responses=True)
         self._ttl = ttl_seconds
 
-    async def append_line(self, call_id: str, speaker: str, text: str, interrupted: bool = False) -> None:
+    async def append_line(
+        self,
+        call_id: str,
+        speaker: str,
+        text: str,
+        interrupted: bool = False,
+        timestamp: float | None = None,
+    ) -> None:
         key = KEY_PREFIX + call_id
-        line = ContextLine(speaker=speaker, text=text, interrupted=interrupted, timestamp=time.time())
+        line = ContextLine(
+            speaker=speaker,
+            text=text,
+            interrupted=interrupted,
+            timestamp=time.time() if timestamp is None else timestamp,
+        )
         await self._redis.rpush(key, line.to_json())
         await self._redis.ltrim(key, -MAX_LINES, -1)
         await self._redis.expire(key, self._ttl)

@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from auth import generate_api_key, hash_key, require_platform_token, require_tenant_auth  # noqa: E402
 from crypto import decrypt, encrypt  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
-from rate_limit import PROVISION_LIMIT, rate_limited  # noqa: E402
+from rate_limit import DASHBOARD_LIMIT, PROVISION_LIMIT, rate_limited  # noqa: E402
 from redis_client import close_redis_client  # noqa: E402
 
 
@@ -83,7 +83,7 @@ app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,7 +92,10 @@ app.add_middleware(
 
 @app.post(
     "/admin/tenants/{tenant_id}/provision",
-    dependencies=[Depends(require_platform_token), Depends(rate_limited(PROVISION_LIMIT))],
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(rate_limited(PROVISION_LIMIT, budget="provision")),
+    ],
 )
 async def provision_tenant(tenant_id: str):
     """Stage 1 of docs/AGENCY_ONBOARDING.md's onboarding flow -- the very
@@ -233,7 +236,7 @@ async def get_calendar_credentials(tenant_id: str):
 
 @app.get(
     "/admin/tenants/{tenant_id}/properties",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def list_properties(
     tenant_id: str,
@@ -270,7 +273,7 @@ async def list_properties(
 
 @app.get(
     "/admin/tenants/{tenant_id}/leads",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def list_leads(
     tenant_id: str,
@@ -310,7 +313,7 @@ async def list_leads(
 
 @app.get(
     "/admin/tenants/{tenant_id}/appointments",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def list_appointments(
     tenant_id: str,
@@ -348,7 +351,7 @@ async def list_appointments(
 
 @app.get(
     "/admin/tenants/{tenant_id}/calls",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def list_calls(
     tenant_id: str,
@@ -388,7 +391,7 @@ async def list_calls(
 
 @app.get(
     "/admin/tenants/{tenant_id}/calls/{call_id}",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def get_call_detail(tenant_id: str, call_id: str):
     async with tenant_connection(tenant_id) as conn:
@@ -423,7 +426,7 @@ async def get_call_detail(tenant_id: str, call_id: str):
 
 @app.get(
     "/admin/tenants/{tenant_id}/stats",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
 )
 async def get_dashboard_stats(tenant_id: str):
     async with tenant_connection(tenant_id) as conn:

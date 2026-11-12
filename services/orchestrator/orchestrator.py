@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Protocol
 from google.genai import types as genai_types
 from livekit import api, rtc
 
-from conversation_context import ConversationContextStore
+from conversation_context import ContextLine, ConversationContextStore
 from conversation_store import ToolInvocationRecord, save_conversation_data
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from human_transfer import transfer_to_broker
@@ -152,6 +152,7 @@ class CallOrchestrator:
         self._tasks: list[asyncio.Task] = []
         self._forwarded_track_sids: set[str] = set()
         self._transcript_lines: list[str] = []
+        self._conversation_lines: list[ContextLine] = []
         self._transcript_buffer: dict[str, str] = {"caller": "", "agent": ""}
         self._call_started_at = time.monotonic()
         # Tracks whether the agent's audio is currently playing out, so a VAD
@@ -415,11 +416,22 @@ class CallOrchestrator:
         suffix = " (interrupted)" if interrupted else ""
         self._transcript_lines.append(f"{label}: {text}{suffix}")
         self._transcript_buffer[speaker] = ""
+        line = ContextLine(
+            speaker=speaker,
+            text=text,
+            interrupted=interrupted,
+            timestamp=time.time(),
+        )
+        self._conversation_lines.append(line)
         if self._conversation_context is not None:
             self._tasks.append(
                 asyncio.create_task(
                     self._conversation_context.append_line(
-                        self._room.name, speaker, text, interrupted=interrupted
+                        self._room.name,
+                        speaker,
+                        text,
+                        interrupted=interrupted,
+                        timestamp=line.timestamp,
                     )
                 )
             )
@@ -575,7 +587,7 @@ class CallOrchestrator:
     def _resolve_call_outcome(self) -> str:
         if self._call_transferred:
             return "transferred"
-        tool_names = {inv.tool_name for inv in self._tool_invocations}
+        tool_names = {inv.tool_name for inv in self._tool_invocations if inv.success}
         if "book_site_visit" in tool_names:
             return "booked"
         if "update_lead_qualification" in tool_names:
@@ -605,18 +617,19 @@ class CallOrchestrator:
         if self._fallback_session is not None:
             await self._fallback_session.__aexit__(None, None, None)
 
-        if self._database_url is not None and self._transcript_lines:
+        if self._database_url is not None and (self._transcript_lines or self._tool_invocations):
             duration_seconds = int(time.monotonic() - self._call_started_at)
-            try:
-                await save_interaction(
-                    database_url=self._database_url,
-                    tenant_id=self._tenant_id,
-                    call_id=self._room.name,
-                    transcript="\n".join(self._transcript_lines),
-                    duration_seconds=duration_seconds,
-                )
-            except Exception:
-                logger.exception("Failed to save interaction transcript")
+            if self._transcript_lines:
+                try:
+                    await save_interaction(
+                        database_url=self._database_url,
+                        tenant_id=self._tenant_id,
+                        call_id=self._room.name,
+                        transcript="\n".join(self._transcript_lines),
+                        duration_seconds=duration_seconds,
+                    )
+                except Exception:
+                    logger.exception("Failed to save interaction transcript")
 
             outcome = self._resolve_call_outcome()
             try:
@@ -630,6 +643,7 @@ class CallOrchestrator:
                     barge_in_count=self._barge_in_count,
                     outcome=outcome,
                     lead_id=self._lead_id,
+                    conversation_lines=self._conversation_lines,
                 )
             except Exception:
                 logger.exception("Failed to save conversation data")

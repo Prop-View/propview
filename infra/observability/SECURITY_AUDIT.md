@@ -119,20 +119,22 @@ at a window boundary) is a minor gap against the real threat model here
 - `services/tool-router/rate_limit.py`: 120 requests / 10s per tenant on
   `/tools/call` (the tenant_id lives in the request body there, so this
   is enforced inline in the route handler, not a `Depends()`).
-- `services/admin-api/rate_limit.py`: 30 requests / 60s per tenant across
-  every tenant-scoped route (shared budget, not per-route — the point is
-  bounding one tenant's *overall* traffic), with a separately, much
-  tighter 5 requests / 60s budget just for `/provision` (mints/rotates a
-  tenant's credential, a materially more sensitive action).
+- `services/admin-api/rate_limit.py`: 30 requests / 60s per tenant for
+  normal tenant-scoped operations, a separate 300 requests / 60s budget
+  for dashboard reads, and a separate 5 requests / 60s budget for
+  `/provision` (mints/rotates a tenant's credential, a materially more
+  sensitive action). The read budget prevents normal dashboard polling by
+  several staff from consuming the write/API budget.
 
 Both configurable via env vars (`RATE_LIMIT_*`, see each service's
 `.env.example`) with the above as defaults. Live-verified against real
 running instances, not just unit tests: 125 real HTTP calls to
 tool-router in a tight loop returned exactly 120×200 then 5×429; 35 real
-calls to admin-api returned exactly 29×200 then 6×429 (one request
-already consumed by an earlier `/provision` call sharing the same
-per-tenant budget) — the limits fire at exactly the configured
-threshold, not approximately.
+calls to admin-api returned exactly 29×200 then 6×429 at the
+then-current shared per-tenant limit — the limits fired at exactly the
+configured threshold, not approximately. The later dashboard-read budget
+and independent provisioning bucket are covered by Redis-backed tests in
+`services/admin-api/tests/test_rate_limit.py`.
 
 ## 5. TLS (PROP-108) — config built, not yet deployed against a real cert
 

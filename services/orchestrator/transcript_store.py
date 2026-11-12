@@ -10,10 +10,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import asyncpg
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compliance"))
 from pii_masking import mask_pii  # noqa: E402
+
+from db import tenant_connection  # noqa: E402
 
 
 async def save_interaction(
@@ -30,27 +30,16 @@ async def save_interaction(
 
     masked_transcript = mask_pii(transcript)
 
-    conn = await asyncpg.connect(database_url)
-    try:
-        # set_config(..., true) is transaction-LOCAL -- it must be set inside
-        # the same transaction as the INSERT, or (as a bare conn.execute()
-        # auto-commits its own implicit transaction) the setting is gone by
-        # the time the next statement runs and RLS's WITH CHECK rejects the
-        # insert as having no tenant context. Caught by running this for
-        # real: first attempt failed with InsufficientPrivilegeError.
-        async with conn.transaction():
-            await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tenant_id)
-            await conn.execute(
-                """
-                INSERT INTO interactions (tenant_id, contact_id, lead_id, call_id, channel, transcript, duration_seconds)
-                VALUES ($1, $2, $3, $4, 'voice', $5, $6)
-                """,
-                tenant_id,
-                contact_id,
-                lead_id,
-                call_id,
-                masked_transcript,
-                duration_seconds,
-            )
-    finally:
-        await conn.close()
+    async with tenant_connection(tenant_id, database_url) as conn:
+        await conn.execute(
+            """
+            INSERT INTO interactions (tenant_id, contact_id, lead_id, call_id, channel, transcript, duration_seconds)
+            VALUES ($1, $2, $3, $4, 'voice', $5, $6)
+            """,
+            tenant_id,
+            contact_id,
+            lead_id,
+            call_id,
+            masked_transcript,
+            duration_seconds,
+        )

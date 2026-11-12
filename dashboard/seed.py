@@ -3,7 +3,7 @@ then inserts CRM + call data directly into Postgres (since those are
 created by the orchestrator/tool-router during live calls, not the Admin API).
 
 Run: PLATFORM_OPERATOR_TOKEN=<token> python -I seed.py
-Requires: Admin API running on port 8100, Postgres running.
+Requires: Admin API running on port 8001, Postgres running.
 Set PLATFORM_OPERATOR_TOKEN env var (from services/admin-api/.env).
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 import asyncpg
 import httpx
 
-API_BASE = os.environ.get("API_URL", "http://localhost:8100")
+API_BASE = os.environ.get("API_URL", "http://localhost:8001")
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://propview_app:devpassword@localhost/propview_dev"
 )
@@ -261,11 +261,14 @@ async def main():
 
     creds_path = Path(__file__).parent / ".dashboard-credentials"
     creds_path.write_text(
-        f"TENANT_ID={TENANT_ID}\nAPI_KEY={api_key}\nDASHBOARD=http://localhost:3000\nAPI={API_BASE}\n"
+        f"TENANT_ID={TENANT_ID}\nAPI_KEY={api_key}\n"
+        f"DASHBOARD=http://localhost:5173\nAPI={API_BASE}\n"
     )
     print()
     print(f"Credentials saved to {creds_path}")
-    print("Open http://localhost:3000 and use the tenant ID and API key from that file.")
+    print(
+        "Open http://localhost:5173 and use the tenant ID and API key from that file."
+    )
 
 
 if __name__ == "__main__":

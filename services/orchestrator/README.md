@@ -346,6 +346,22 @@ section above for the full result.
       `interactions.transcript` via `transcript_store.py` — the write path
       PROP-506's own README had flagged as missing. `DATABASE_URL` unset
       skips it entirely (safe no-op for local dev without Postgres).
+- [x] Structured `conversation_turns` and `tool_invocations` are PII-masked
+      before Postgres writes. The call's in-process turn snapshot is
+      persisted in full, independent of Redis's 200-line live context
+      window; that window remains bounded for in-call use. The RLS-scoped
+      backfill command for previously stored rows is
+      `python mask_existing_conversation_pii.py --tenant-id <slug>` from
+      this service directory, with `DATABASE_URL` set to the `propview_app`
+      role. It must be run once per tenant.
+- [x] Call outcomes only count successful booking/qualification tool
+      invocations. Migration `010_conversation_outcome_values.sql`
+      normalizes legacy `dropped`/`nurture` values to `unknown` and removes
+      those unsupported outcomes from the schema.
+- [x] **Verified passing 2026-11-13**: 29/29 focused orchestrator tests
+      against real Postgres and Redis. The structured-conversation test
+      confirms Redis retains only 200 lines while all 225 snapshot turns
+      are persisted to Postgres.
 - [x] Predictive barge-in (PROP-202/203/204): `../vap-sidecar/`'s Silero
       VAD runs in-process on every caller audio frame; a detected speech
       onset during agent playback clears the playout queue immediately,

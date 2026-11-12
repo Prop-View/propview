@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8100'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
 
 let _tenantId = localStorage.getItem('propview_tenant_id') || ''
 let _apiKey = localStorage.getItem('propview_api_key') || ''

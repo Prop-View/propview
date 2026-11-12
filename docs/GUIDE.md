@@ -191,6 +191,12 @@ different Google account.
 
 ## 3. Using the Product
 
+The existing React dashboard is in `dashboard/`. Start the Admin API on
+port 8001 and the dashboard on Vite's default port 5173; its
+`VITE_API_URL` default points to `http://localhost:8001`. The dashboard
+currently uses tenant API keys; self-serve account login is not yet
+implemented.
+
 ### 3.1 Onboard a new tenant (agency)
 
 Full walkthrough with all the exact `curl` commands:

@@ -1,16 +1,57 @@
-# React + Vite
+# Propview Agency Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The React + Vite dashboard gives agency staff a read-only view of their
+properties, leads, appointments, calls, and call analytics. It uses the
+existing Tenant Admin API; it is not a separate backend or a second
+frontend.
 
-Currently, two official plugins are available:
+## Local setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+cd dashboard
+npm install
+cp .env.example .env
+npm run dev
+```
 
-## React Compiler
+By default Vite serves the dashboard at `http://localhost:5173` and the
+Admin API at `http://localhost:8001`. The Admin API's local CORS default
+allows the Vite origin. If the API is hosted elsewhere, set
+`VITE_API_URL` in `dashboard/.env` to its base URL (without a trailing
+slash).
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Start the Admin API and its required Postgres and Redis services first;
+see [the Admin API README](../services/admin-api/README.md) and
+[the developer guide](../docs/GUIDE.md).
 
-## Expanding the Oxlint configuration
+## Current dashboard pages
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+- Overview: call, lead, property, appointment, and conversion metrics.
+- Calls: recent call history and per-call detail, including structured
+  turns, tool invocations, and analytics.
+- Leads and appointments: tenant-scoped read views.
+- Properties: tenant-scoped listing inventory.
+- Analytics: call trends and tool usage.
+- Settings: current agency branding controls.
+
+The current dashboard authenticates with a tenant Admin API key. The key
+is stored in browser local storage by the existing login flow; replacing
+this with password-based sessions and removing browser-persisted keys is
+planned for Phase 4. Do not use this prototype as a public production
+login surface.
+
+## Development checks
+
+```bash
+npm run lint
+npm run build
+```
+
+## Current gaps
+
+- Signup, password login/reset, team management, and session-based browser
+  authentication are not implemented.
+- Settings controls beyond branding are not connected to tenant settings.
+- Listing/document uploads, editing, usage, and billing views are not
+  implemented.
+- Component tests and a Playwright smoke test are not yet present.
