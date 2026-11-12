@@ -23,6 +23,7 @@ import asyncio
 import logging
 import sys
 import time
+import wave
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -44,6 +45,9 @@ from vocal_filler import VocalFillerPlayer
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compliance"))
+from fair_housing_filter import COMPLIANT_REDIRECT_RESPONSE, check_fair_housing  # noqa: E402
+
 sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))  # append, not insert(0) -- see tool-router/tools/_calendar_context.py
 from sms_dispatch import SmsDispatchError, send_sms  # noqa: E402
 
@@ -55,6 +59,8 @@ logger = logging.getLogger("orchestrator")
 GEMINI_INPUT_RATE_HZ = 16000
 GEMINI_OUTPUT_RATE_HZ = 24000
 AGENT_TRACK_NAME = "agent-voice"
+FAIR_HOUSING_AUDIO_PATH = Path(__file__).resolve().parent / "fair_housing_audio" / "fair_housing_redirect.wav"
+FAIR_HOUSING_FRAME_BYTES = GEMINI_OUTPUT_RATE_HZ * 20 // 1000 * 2
 
 # PROP-503: a local tool -- not fetched from the Tool Router's /tools/schema
 # like the others, since executing it needs direct LiveKit room/SIP admin
@@ -166,6 +172,8 @@ class CallOrchestrator:
         # drops already-captured frames, it doesn't stop the filler's
         # capture loop from refilling the queue with the rest of the clip.
         self._active_filler: VocalFillerPlayer | None = None
+        self._fair_housing_response_task: asyncio.Task | None = None
+        self._suppress_gemini_audio = False
         # PROP-402: who's calling, and which lead row this call has already
         # created (so repeated update_lead_qualification calls within one
         # call update the same row instead of creating a new one per
@@ -320,6 +328,8 @@ class CallOrchestrator:
     async def _run_forward_gemini_audio_to_room(self) -> None:
         async for event in self._gemini.receive_events():
             if isinstance(event, AudioChunk):
+                if self._suppress_gemini_audio:
+                    continue
                 latency_ms = self._telemetry.record_response_audio()
                 if self._health_monitor is not None:
                     self._health_monitor.record_response_latency(latency_ms)
@@ -335,7 +345,9 @@ class CallOrchestrator:
                 await self._publish_source.capture_frame(frame)
             elif isinstance(event, TurnComplete):
                 logger.debug("Gemini turn complete")
-                self._agent_speaking = False
+                self._suppress_gemini_audio = False
+                if self._fair_housing_response_task is None or self._fair_housing_response_task.done():
+                    self._agent_speaking = False
                 self._telemetry.record_turn_complete()
             elif isinstance(event, Interrupted):
                 # Gemini's own (reactive) barge-in signal -- arrives after a
@@ -348,6 +360,8 @@ class CallOrchestrator:
                 self._telemetry.record_interrupted(source="gemini")
                 self._barge_in_count += 1
                 self._agent_speaking = False
+                self._suppress_gemini_audio = False
+                self._cancel_fair_housing_response()
                 self._publish_source.clear_queue()
                 self._flush_transcript_buffer("agent", interrupted=True)
                 if self._active_filler is not None:
@@ -370,6 +384,7 @@ class CallOrchestrator:
         self._telemetry.record_interrupted(source="vap_predictive")
         self._barge_in_count += 1
         self._agent_speaking = False
+        self._cancel_fair_housing_response()
         self._publish_source.clear_queue()
         self._flush_transcript_buffer("agent", interrupted=True)
         if self._active_filler is not None:
@@ -388,7 +403,85 @@ class CallOrchestrator:
         # that utterance complete.
         self._transcript_buffer[chunk.speaker] += chunk.text
         if chunk.finished:
+            completed_text = self._transcript_buffer[chunk.speaker]
             self._flush_transcript_buffer(chunk.speaker)
+            if chunk.speaker == "caller":
+                redirect = check_fair_housing(completed_text)
+                if redirect is not None:
+                    self._start_fair_housing_response(redirect)
+
+    def _start_fair_housing_response(self, response: str) -> None:
+        if self._fair_housing_response_task is not None and not self._fair_housing_response_task.done():
+            return
+        if self._publish_source is None:
+            raise RuntimeError("CallOrchestrator must be started before Fair Housing enforcement")
+
+        logger.warning("Fair Housing steering question detected; replacing Gemini audio with compliant redirect")
+        self._suppress_gemini_audio = True
+        self._agent_speaking = True
+        self._publish_source.clear_queue()
+        self._flush_transcript_buffer("agent", interrupted=True)
+        if self._active_filler is not None:
+            self._tasks.append(asyncio.create_task(self._active_filler.stop()))
+            self._active_filler = None
+
+        task = asyncio.create_task(self._play_fair_housing_response(response))
+        self._fair_housing_response_task = task
+        self._tasks.append(task)
+
+    def _cancel_fair_housing_response(self) -> None:
+        task = self._fair_housing_response_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._fair_housing_response_task = None
+
+    async def _play_fair_housing_response(self, response: str) -> None:
+        current_task = asyncio.current_task()
+        try:
+            source = self._publish_source
+            if source is None:
+                raise RuntimeError("Audio source is unavailable during Fair Housing response playback")
+            with wave.open(str(FAIR_HOUSING_AUDIO_PATH), "rb") as audio_file:
+                audio_format = (audio_file.getframerate(), audio_file.getnchannels(), audio_file.getsampwidth())
+                if audio_format != (GEMINI_OUTPUT_RATE_HZ, 1, 2):
+                    raise ValueError(f"Invalid Fair Housing response audio format: {audio_format}")
+                audio_data = audio_file.readframes(audio_file.getnframes())
+
+            for offset in range(0, len(audio_data), FAIR_HOUSING_FRAME_BYTES):
+                frame_data = audio_data[offset : offset + FAIR_HOUSING_FRAME_BYTES]
+                if len(frame_data) != FAIR_HOUSING_FRAME_BYTES:
+                    break
+                await source.capture_frame(
+                    rtc.AudioFrame(
+                        data=frame_data,
+                        sample_rate=GEMINI_OUTPUT_RATE_HZ,
+                        num_channels=1,
+                        samples_per_channel=GEMINI_OUTPUT_RATE_HZ * 20 // 1000,
+                    )
+                )
+            self._transcript_lines.append(f"Agent: {response}")
+            line = ContextLine(speaker="agent", text=response, interrupted=False, timestamp=time.time())
+            self._conversation_lines.append(line)
+            if self._fair_housing_response_task is current_task:
+                self._fair_housing_response_task = None
+                self._agent_speaking = False
+            if self._conversation_context is not None:
+                await self._conversation_context.append_line(
+                    self._room.name,
+                    "agent",
+                    response,
+                    interrupted=False,
+                    timestamp=line.timestamp,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to play or record Fair Housing compliant response")
+            raise
+        finally:
+            if self._fair_housing_response_task is current_task:
+                self._fair_housing_response_task = None
+                self._agent_speaking = False
 
     def _flush_transcript_buffer(self, speaker: str, interrupted: bool = False) -> None:
         """PROP-204: flush whatever's accumulated in one speaker's

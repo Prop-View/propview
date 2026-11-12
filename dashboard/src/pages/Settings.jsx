@@ -103,7 +103,7 @@ export default function Settings() {
             </label>
             <input
               type="text"
-              value="gemini-3.1-flash-live-preview"
+              value="gemini-3.8-live"
               disabled
               className="w-full px-3 py-2 rounded-lg border border-border text-[13px] font-mono outline-none bg-border-light text-text-muted"
             />

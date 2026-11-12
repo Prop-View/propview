@@ -119,17 +119,12 @@ against the explicit-dispatch API (`lk.agent_dispatch.create_dispatch()`,
 not a SIP-originated room), which exercises the identical dispatch
 mechanism this rule triggers automatically; see
 `../../services/orchestrator/README.md`'s Auto-dispatch section for that
-result. One open flag, not resolved here: `setup_sip_routing.sh` invokes
-`lk sip dispatch-rule create --config <file>`, but this repo's own
-dispatch rule docs (checked 2026-10-14) describe current `lk` CLI syntax
-as `lk sip dispatch create <file>` with no `--config` flag and no hyphen
-in "dispatch" — possibly a CLI version drift between when that script was
-written and now, same category of thing already found once with
-`livekit-agents`' own API (`AgentServer` replacing an older
-`WorkerOptions` shape). Not fixed here since there's no real `lk` CLI
-installed in this environment to verify the *correct* current syntax
-against — confirm directly against whatever `lk` version is actually
-installed before relying on `setup_sip_routing.sh` as-is.
+result. `setup_sip_routing.sh` now uses the current documented positional
+request-file commands: `lk sip inbound create <file>` and
+`lk sip dispatch create <file>`. The `lk` executable is not installed in
+this environment, so those commands and the request payloads have not
+been exercised here; verify them against the installed CLI before
+creating production SIP resources.
 
 ## Definition of Done (from Sprint Plan)
 

@@ -85,7 +85,7 @@ secrets).
 | Var | Required? | Notes |
 |---|---|---|
 | `GEMINI_API_KEY` | **Yes** | See 2.1. |
-| `GEMINI_LIVE_MODEL` | No | Defaults to `gemini-3.1-flash-live-preview`. |
+| `GEMINI_LIVE_MODEL` | No | Defaults to `gemini-3.8-live`, Google's current stable Gemini Live model. |
 | `GEMINI_VOICE_NAME` | No | Picks one of Gemini's 30 prebuilt voices (e.g. `Kore`, `Puck`, `Sulafat`). Unset = Gemini's own default. Full list with each voice's character in `gemini_live_client.py`'s `PREBUILT_VOICES`. |
 
 **`services/orchestrator/.env`** — the call-handling process (`main.py`)
@@ -94,6 +94,7 @@ secrets).
 | `REDIS_URL` | Has a local default | `redis://localhost:6379` if unset. Session store + conversation context window. |
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Has a local default | `ws://localhost:7880` / `devkey` / `secret` if unset, matching local `livekit-server --dev`; set to real values once deployed (section 5). |
 | `GEMINI_API_KEY` | **Yes, no default** | Same value as 2.1 — `main.py` constructs the Gemini session directly; a `KeyError` at startup if unset. |
+| `GEMINI_LIVE_MODEL` | No | Defaults to `gemini-3.8-live`; set here to override the Live model used by `main.py`/`worker.py`. |
 | `TOOL_ROUTER_URL` | Has a local default | `http://localhost:8000` if unset. |
 | `TENANT_ID` | Has a local default | `default` if unset — set this per real tenant (see section 3). |
 | `INTERNAL_SERVICE_TOKEN` | **Yes, no default** | **Must match** the same var in `services/tool-router/.env` exactly — this is how the orchestrator authenticates to the Tool Router; every call gets a real 401 without it. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. `setup_dev_env.sh` generates and shares this automatically. |

@@ -5,15 +5,19 @@ Wraps google-genai's `client.aio.live` session with the shapes this project
 needs: push 16kHz mono PCM16 frames in, get 24kHz mono PCM16 frames plus
 turn/interruption events out, across the whole call (not just one turn).
 
-Verified against google-genai==1.75.0's actual Live API surface
-(`google.genai.live.AsyncSession`) — not just the public docs — since this
-SDK's live API has changed shape across versions. If a newer/older
-google-genai version behaves differently, check `AsyncSession.receive`,
-`send_realtime_input`, and `types.LiveServerContent` directly.
+Verified against the installed Google Gen AI SDK's actual Live API
+surface (`google.genai.live.AsyncSession`) — not just the public docs —
+since this SDK's live API has changed shape across versions. The
+`google-genai>=1.75.0` minimum is also checked for the session-resumption,
+GoAway, and context-compression types used here. If another SDK version
+behaves differently, check `AsyncSession.receive`,
+`send_realtime_input`, and the matching `google.genai.types` models.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -23,7 +27,8 @@ from google.genai import types
 
 INPUT_SAMPLE_RATE_HZ = 16000
 OUTPUT_SAMPLE_RATE_HZ = 24000
-DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
+DEFAULT_MODEL = "gemini-3.8-live"
+logger = logging.getLogger(__name__)
 
 # All 30 prebuilt voices Gemini Live/TTS currently share, with Google's own
 # one-word character descriptor -- https://ai.google.dev/gemini-api/docs/speech-generation.
@@ -133,40 +138,104 @@ class GeminiLiveSession:
             speech_config=speech_config,
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            session_resumption=types.SessionResumptionConfig(),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow(),
+            ),
         )
         self._connect_cm = None
         self._session = None
+        self._session_resumption_handle: str | None = None
+        self._session_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "GeminiLiveSession":
-        self._connect_cm = self._client.aio.live.connect(model=self._model, config=self._config)
-        self._session = await self._connect_cm.__aenter__()
+        await self._connect_session()
         return self
 
     async def __aexit__(self, *exc_info) -> None:
-        if self._connect_cm is not None:
-            await self._connect_cm.__aexit__(*exc_info)
+        async with self._session_lock:
+            if self._connect_cm is not None:
+                await self._connect_cm.__aexit__(*exc_info)
+                self._connect_cm = None
+                self._session = None
+
+    async def _connect_session(self) -> None:
+        config = self._config.model_copy(
+            update={
+                "session_resumption": types.SessionResumptionConfig(
+                    handle=self._session_resumption_handle,
+                )
+            }
+        )
+        connect_cm = self._client.aio.live.connect(model=self._model, config=config)
+        session = await connect_cm.__aenter__()
+        self._connect_cm = connect_cm
+        self._session = session
+
+    async def _resume_session(self, time_left: str | None) -> None:
+        if self._session_resumption_handle is None:
+            raise RuntimeError(
+                "Gemini Live requested connection shutdown but has not provided a resumable session handle"
+            )
+        async with self._session_lock:
+            old_connect_cm = self._connect_cm
+            config = self._config.model_copy(
+                update={
+                    "session_resumption": types.SessionResumptionConfig(
+                        handle=self._session_resumption_handle,
+                    )
+                }
+            )
+            new_connect_cm = self._client.aio.live.connect(model=self._model, config=config)
+            new_session = await new_connect_cm.__aenter__()
+
+            self._connect_cm = new_connect_cm
+            self._session = new_session
+            if old_connect_cm is not None:
+                await old_connect_cm.__aexit__(None, None, None)
+
+        logger.info(
+            "Resumed Gemini Live session before connection shutdown (time_left=%s)",
+            time_left,
+        )
 
     async def send_audio(self, pcm16_bytes: bytes) -> None:
         """Send a chunk of 16kHz mono PCM16 audio (e.g. one 20ms frame)."""
-        await self._session.send_realtime_input(
-            audio=types.Blob(data=pcm16_bytes, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE_HZ}")
-        )
+        async with self._session_lock:
+            session = self._session
+            if session is None:
+                raise RuntimeError("GeminiLiveSession must be entered before sending audio")
+            await session.send_realtime_input(
+                audio=types.Blob(data=pcm16_bytes, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE_HZ}")
+            )
 
     async def send_end_of_audio(self) -> None:
         """Signal the caller stopped speaking (e.g. call ended)."""
-        await self._session.send_realtime_input(audio_stream_end=True)
+        async with self._session_lock:
+            session = self._session
+            if session is None:
+                raise RuntimeError("GeminiLiveSession must be entered before ending audio")
+            await session.send_realtime_input(audio_stream_end=True)
 
     async def send_tool_response(self, call_id: str, name: str, response: dict) -> None:
         """Reply to a ToolCallRequest event with the tool's result."""
-        await self._session.send_tool_response(
-            function_responses=types.FunctionResponse(id=call_id, name=name, response=response)
-        )
+        async with self._session_lock:
+            session = self._session
+            if session is None:
+                raise RuntimeError("GeminiLiveSession must be entered before sending tool responses")
+            await session.send_tool_response(
+                function_responses=types.FunctionResponse(id=call_id, name=name, response=response)
+            )
 
     async def send_text(self, text: str, end_of_turn: bool = True) -> None:
         """Send text as a user turn. Mainly for testing without a mic/real call."""
-        await self._session.send_client_content(
-            turns=types.Content(role="user", parts=[types.Part(text=text)]), turn_complete=end_of_turn
-        )
+        async with self._session_lock:
+            session = self._session
+            if session is None:
+                raise RuntimeError("GeminiLiveSession must be entered before sending text")
+            await session.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part(text=text)]), turn_complete=end_of_turn
+            )
 
     async def receive_events(self) -> AsyncIterator[LiveEvent]:
         """Yields events for the whole session (all turns, not just one).
@@ -177,41 +246,60 @@ class GeminiLiveSession:
         """
         while True:
             got_message = False
+            reconnect = False
             async for message in self._session.receive():
                 got_message = True
+
+                resumption_update = message.session_resumption_update
+                if (
+                    resumption_update is not None
+                    and resumption_update.resumable
+                    and resumption_update.new_handle
+                ):
+                    self._session_resumption_handle = resumption_update.new_handle
 
                 if message.tool_call:
                     for call in message.tool_call.function_calls:
                         yield ToolCallRequest(id=call.id, name=call.name, args=call.args or {})
 
                 content = message.server_content
-                if content is None:
-                    continue
+                if content is not None:
+                    if content.interrupted:
+                        yield Interrupted()
 
-                if content.interrupted:
-                    yield Interrupted()
+                    if content.input_transcription and content.input_transcription.text:
+                        yield TranscriptChunk(
+                            speaker="caller",
+                            text=content.input_transcription.text,
+                            finished=bool(content.input_transcription.finished),
+                        )
 
-                if content.input_transcription and content.input_transcription.text:
-                    yield TranscriptChunk(
-                        speaker="caller",
-                        text=content.input_transcription.text,
-                        finished=bool(content.input_transcription.finished),
+                    if content.output_transcription and content.output_transcription.text:
+                        yield TranscriptChunk(
+                            speaker="agent",
+                            text=content.output_transcription.text,
+                            finished=bool(content.output_transcription.finished),
+                        )
+
+                    if content.model_turn:
+                        for part in content.model_turn.parts:
+                            if part.inline_data and part.inline_data.data:
+                                yield AudioChunk(data=part.inline_data.data)
+
+                    if content.turn_complete:
+                        yield TurnComplete()
+
+                if message.go_away is not None:
+                    logger.info(
+                        "Gemini Live connection is closing; reconnecting (time_left=%s)",
+                        message.go_away.time_left,
                     )
+                    await self._resume_session(message.go_away.time_left)
+                    reconnect = True
+                    break
 
-                if content.output_transcription and content.output_transcription.text:
-                    yield TranscriptChunk(
-                        speaker="agent",
-                        text=content.output_transcription.text,
-                        finished=bool(content.output_transcription.finished),
-                    )
-
-                if content.model_turn:
-                    for part in content.model_turn.parts:
-                        if part.inline_data and part.inline_data.data:
-                            yield AudioChunk(data=part.inline_data.data)
-
-                if content.turn_complete:
-                    yield TurnComplete()
+            if reconnect:
+                continue
 
             if not got_message:
                 # `receive()` returned without yielding anything and without

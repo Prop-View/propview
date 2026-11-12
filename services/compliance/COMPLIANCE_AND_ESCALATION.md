@@ -5,7 +5,7 @@ PII, disclosure) and escalation (human transfer, AI-engine fallback)
 across `services/compliance/`, `services/prompts/`, and
 `services/orchestrator/` — plus the multi-region regulatory surface the
 architecture reference calls for and what of it is genuinely built vs.
-still a gap. Status as of 2026-09-08.
+still a gap. Status updated 2026-11-13.
 
 ## 1. Fair Housing / anti-steering (PROP-505)
 
@@ -24,38 +24,34 @@ Two layers, deliberately redundant:
    questions the deterministic filter's keyword matching can't
    enumerate in advance.
 
-**Known gap, not silently ignored**: the filter is a standalone, fully
-tested module — **it is not wired into the live call flow.** This is a
-genuine open design problem, not missing plumbing: Gemini Live starts
-generating (and streaming audio for) its own response as soon as it
-detects end-of-speech, in the same turn `input_transcription` becomes
-available. There's no exposed primitive in the current integration to
-hold or cancel that in-flight audio if the transcription turns out to
-violate this filter after the fact. Two real options, neither built:
-- Buffer playout until the transcription is checked (adds real latency
-  to every single turn, not just violating ones — a bad trade for the
-  common case to guard the rare one).
-- Detect on the *caller's* finished `TranscriptChunk`
-  (`orchestrator._record_transcript_chunk` already captures this) and,
-  on a match, interrupt whatever Gemini is currently saying
-  (`_publish_source.clear_queue()`, the same mechanism PROP-203's
-  barge-in uses) and play a pre-recorded canned disclosure — architecturally
-  possible using pieces that already exist (`vocal_filler.py`'s playback
-  pattern), but not implemented here; left as a defined, scoped follow-up
-  rather than a rushed partial integration.
+**Live-wired in Phase 1**: `orchestrator.py` checks the accumulated
+*caller's* transcript only when a caller `TranscriptChunk.finished` is
+true. On a match, it clears the LiveKit playout queue, suppresses further
+Gemini audio for that turn, and plays
+`../orchestrator/fair_housing_audio/fair_housing_redirect.wav` (24 kHz,
+mono, PCM16). The playback task is tracked and cancelled on barge-in or
+shutdown. The canned response is also appended to the call transcript
+after it plays successfully. The bundled audio was synthesized with the
+local macOS `say` voice and does not match Gemini's selected voice.
 
-The plan's "100% of demographic/steering questions" target realistically
-depends on both layers working together once live-wired — today, only
-the LLM instruction layer is actually in the live call path.
+**Remaining verification gap**: the check depends on Gemini marking a
+caller transcript chunk `finished`. Text-driven runs previously observed
+agent chunks never setting this flag; caller-side behavior has not yet
+been verified with real microphone/SIP speech. This design does not add
+latency to ordinary turns, but the live caller-transcription boundary
+must be verified before claiming reliable enforcement. The filter also
+requires both a protected-class term and a demographic-question pattern,
+so novel phrasings still depend on the LLM instruction layer. The plan's
+"100% of demographic/steering questions" target is not claimed.
 
 ## 2. Mandatory AI disclosure (TCPA)
 
-`system_prompt.py` now requires Gemini to disclose it's an AI assistant
-within its first turn, regardless of what the caller says first (added
-alongside this doc — previously the prompt had no explicit disclosure
-requirement, a real compliance gap this review surfaced). Not yet
-live-verified that Gemini reliably follows this in practice — no
-scenario test exercises "does turn 1 always include the disclosure."
+`system_prompt.py` requires Gemini to disclose it's an AI assistant
+within its first turn, regardless of what the caller says first.
+`tests/e2e-voice/scenarios.py` now includes a first-turn disclosure
+scenario. It is an API-costing live test and has not yet been rerun with
+a real Gemini key after this addition; the prompt requirement is not
+proof that the model follows it on every call.
 
 ## 3. PII masking (PROP-506)
 
@@ -64,7 +60,7 @@ scenario test exercises "does turn 1 always include the disclosure."
 `US_BANK_NUMBER`. Deliberately does not mask property addresses or
 prices (core business data, not PII to hide from the CRM itself).
 
-**Live-wired**, unlike the Fair Housing filter: `orchestrator.py`
+**Live-wired**: `orchestrator.py`
 captures Gemini's speech transcription into a per-call buffer as the
 call happens, and `transcript_store.py` masks it via this module and
 persists it to `interactions.transcript` when the call ends, with the
@@ -82,7 +78,7 @@ other two are explicitly not built, not silently assumed-covered:
 | Region | Framework | Requirement | Status |
 |---|---|---|---|
 | **US** | TCPA & Fair Housing Act | AI disclosure | Implemented (§2 above) |
-| **US** | TCPA & Fair Housing Act | Anti-steering guardrails | Partially implemented (§1 — LLM layer live, deterministic filter not wired) |
+| **US** | TCPA & Fair Housing Act | Anti-steering guardrails | Partially implemented (§1 — deterministic filter is live-wired; caller transcript finish behavior remains unverified) |
 | **US** | TCPA | Prior express consent before automated *outbound* calling | **Not applicable yet** — this system only handles inbound calls; nothing here originates outbound calls to a consumer |
 | **India** | DPDP Act 2023 & TRAI DND | Scrub against National DND registry before dialing | **Not built** — again, only relevant once outbound calling exists |
 | **India** | DPDP Act 2023 | Consent manager, explicit opt-in capture | **Not built** — no consent-capture flow anywhere in this codebase |
@@ -132,9 +128,12 @@ beyond the swap/transfer call itself.
 
 ## Definition of Done (from Sprint Plan)
 
-- [x] Fair Housing filter implemented and tested (PROP-505) — not
-      live-wired, documented above as a real open design problem.
+- [x] Fair Housing filter implemented, tested, and live-wired to replace
+      Gemini audio with a pre-recorded redirect; caller-side transcript
+      completion behavior still needs real-audio verification (§1).
 - [x] TCPA AI-disclosure requirement in the system prompt.
+- [x] First-turn disclosure scenario added to the live E2E suite; real-key
+      verification remains outstanding (§2).
 - [x] PII masking implemented, tested, and live-wired into the transcript
       write path (PROP-506).
 - [x] Human escalation workflow documented and implemented (PROP-503/504).

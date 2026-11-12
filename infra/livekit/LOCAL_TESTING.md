@@ -40,13 +40,13 @@ export LIVEKIT_URL=ws://localhost:7880
 export LIVEKIT_API_KEY=devkey
 export LIVEKIT_API_SECRET=secret
 
-lk sip inbound-trunk create --config local-inbound-trunk.json
-lk sip dispatch-rule create --config dispatch-rule.json
+lk sip inbound create local-inbound-trunk.json
+lk sip dispatch create dispatch-rule.json
 ```
 
-If either command errors on the exact field names, run
-`lk sip inbound-trunk create --help` — the JSON schema has shifted between
-LiveKit CLI versions; adjust to match what your installed `lk` expects.
+The current CLI uses positional JSON request files. If either command
+rejects the request shape, check `lk sip inbound create --help` or
+`lk sip dispatch create --help` for the installed CLI version.
 
 ## 5. Place a test call
 

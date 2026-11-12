@@ -5,22 +5,29 @@ the bidirectional audio stream the orchestrator (PROP-105) feeds LiveKit
 frames into and reads spoken responses from.
 
 Built on the official `google-genai` SDK rather than a hand-rolled WebSocket
-protocol implementation, and verified directly against the installed
-`google-genai==1.75.0` package's actual `AsyncSession` API (not just the
-public docs, which lag SDK changes). If you're on a different version and
+protocol implementation. The client uses the installed SDK's
+`AsyncSession` API for streaming, session resumption, GoAway handling, and
+context-window compression. If you're on a different version and
 something breaks, check `google.genai.live.AsyncSession.receive` /
-`send_realtime_input` and `google.genai.types.LiveServerContent` first —
-this has moved between versions before.
+`send_realtime_input` and the matching `google.genai.types` models first —
+this API has moved between versions before.
 
 **Live-tested 2026-09-02** against a real API key: `models.list()` auth
-check, a full text-in/audio-out handshake on `gemini-3.1-flash-live-preview`
-(received real audio bytes back), and `GeminiLiveSession.send_audio()` /
-`send_end_of_audio()` exercised over the network with no errors. Not yet
-tested with real speech + playback — that needs an actual mic/speaker, see
-`test_mic_call.py`. Note: the model name in `google-genai`'s own docstring
-examples (`gemini-live-2.5-flash-preview`) was **not** available to this
-key; `gemini-3.1-flash-live-preview` was — check what's available with
-`client.models.list()` if this key changes or the model gets deprecated.
+check, a full text-in/audio-out handshake on
+`gemini-3.1-flash-live-preview` (received real audio bytes back), and
+`GeminiLiveSession.send_audio()` / `send_end_of_audio()` exercised over
+the network with no errors. That preview model is now marked legacy by
+Google. The default is now the stable `gemini-3.8-live` model, based on
+Google's [current model list](https://ai.google.dev/gemini-api/docs/models),
+which identifies it as the default Live API model for most low-latency
+voice agents and recommends updating from the legacy preview.
+`GEMINI_LIVE_MODEL` remains configurable in the process environment. The
+SDK's minimum supported version (`google-genai==1.75.0`) was checked for
+the required resumption/compression types and `AsyncSession.receive()`.
+The new default, long-lived session resumption, and context compression
+have only been verified with fake-session unit tests (3/3 passing
+2026-11-13) so far — they still need real-key live verification. Real
+speech + playback also needs a mic/speaker, see `test_mic_call.py`.
 
 ## Setup
 
@@ -67,6 +74,15 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
   for building these from the Tool Router's `/tools/schema`.
 - `send_text()` exists for testing tool-calling/text turns without a
   mic — not used in the real call path (that's always `send_audio`).
+- `GEMINI_LIVE_MODEL` selects the model; unset, it uses Google's current
+  stable `gemini-3.8-live` model. Set it in the environment of the
+  process constructing `GeminiLiveSession` (for example
+  `services/orchestrator/.env` for `main.py`/`worker.py`).
+- Live connection configuration enables session resumption and sliding
+  window context compression. On `GoAway`, the client reconnects with
+  the latest resumable handle. If the server requests shutdown before
+  providing a resumable handle, the client raises an error rather than
+  silently reconnecting without conversation context.
 - `voice_name` (constructor arg, or `GEMINI_VOICE_NAME` env var) selects
   one of Gemini's 30 prebuilt voices — see `PREBUILT_VOICES` in
   `gemini_live_client.py` for the full list with each voice's one-word
@@ -116,3 +132,9 @@ async with GeminiLiveSession(system_instruction=persona_prompt, tools=gemini_too
 - [ ] `test_mic_call.py` round-trips real speech through Gemini (needs a
       real mic — the tool-calling path above was verified via text input
       instead, since this sandbox has no audio hardware).
+- [ ] Verify `gemini-3.8-live` with a real key for text-in/audio-out,
+      real microphone input, session resumption across a GoAway, and
+      caller-side transcript `finished` behavior. The Fair Housing live
+      enforcement and first-turn AI disclosure scenario also need
+      real-audio/live-model verification; see
+      `../compliance/COMPLIANCE_AND_ESCALATION.md`.

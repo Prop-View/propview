@@ -1,6 +1,6 @@
 # PROP-505 / PROP-506: Fair Housing Filter & PII Masking
 
-Deterministic, rule-based pre-filter for demographic/steering questions —
+Deterministic, rule-based detector for demographic/steering questions —
 defense in depth alongside `../prompts/system_prompt.py`'s instruction-based
 handling, not a replacement for it.
 
@@ -15,6 +15,25 @@ misses still has to be caught by the LLM's own judgment via the system
 prompt. The Sprint Plan's "100% of demographic/steering questions"
 Definition of Done realistically depends on both layers working together,
 not this filter alone.
+
+## Live call enforcement
+
+`services/orchestrator/orchestrator.py` checks a caller utterance when its
+transcript chunk is marked finished. A match clears queued Gemini audio,
+suppresses more Gemini audio for the current turn, and plays the bundled
+`services/orchestrator/fair_housing_audio/fair_housing_redirect.wav`
+(24 kHz mono PCM16). The response playback is cancelled on barge-in and
+call shutdown. It is added to the persisted transcript after playback
+completes. The bundled clip uses the local macOS `say` voice, so it may
+sound different from Gemini's selected voice.
+
+**Not yet verified with real audio**: this enforcement depends on
+Gemini's caller-side `TranscriptChunk.finished` signal. The text-driven
+E2E harness previously observed the finish flag remaining false on agent
+transcripts, and caller-side finish behavior still needs a live
+microphone/SIP check. The deterministic filter also intentionally only
+catches its enumerated protected-class + demographic-question patterns;
+the system prompt remains the second layer for novel phrasing.
 
 ## Testing
 
@@ -38,19 +57,12 @@ national origin, etc.) alongside specific instances.
 ## Definition of Done — PROP-505 (from Sprint Plan)
 
 - [x] Filter implemented and tested against the plan's own example scenarios.
-- [ ] Not wired into the orchestrator's live call flow yet, and it's a
-      genuine open design problem, not just missing plumbing: Gemini's
-      Live API starts generating (and streaming audio for) its own
-      response as soon as it detects end-of-speech, in the same turn
-      `input_transcription` becomes available — there's no exposed
-      primitive in the current integration to hold/cancel that in-flight
-      audio if the transcription turns out to violate this filter after
-      the fact. Properly solving this needs either a buffering strategy
-      (delay playout until the transcription is checked, adding latency)
-      or checking transcriptions on a rolling basis to catch violations
-      before the *next* turn rather than the current one. Left as a
-      standalone, fully tested module rather than shipping a
-      race-condition-prone partial integration.
+- [x] Wired to caller finished transcripts in the live orchestrator;
+      matching turns replace queued Gemini audio with a pre-recorded
+      redirect and suppress remaining Gemini audio for that turn.
+- [ ] Verify caller `TranscriptChunk.finished` behavior with real speech
+      and SIP; the text-driven harness does not exercise input audio
+      transcription.
 
 ---
 
