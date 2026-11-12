@@ -30,6 +30,7 @@ from google.genai import types as genai_types
 from livekit import api, rtc
 
 from conversation_context import ConversationContextStore
+from conversation_store import ToolInvocationRecord, save_conversation_data
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from human_transfer import transfer_to_broker
 from metrics import FALLBACK_SWITCHES, HUMAN_TRANSFERS, TOOL_CALLS, TOOL_LATENCY_SECONDS
@@ -172,6 +173,9 @@ class CallOrchestrator:
         # Gemini's function schema.
         self._caller_phone_number: str | None = None
         self._lead_id: int | None = None
+        self._tool_invocations: list[ToolInvocationRecord] = []
+        self._barge_in_count: int = 0
+        self._call_transferred: bool = False
 
     async def start(self) -> None:
         self._telemetry.start()
@@ -341,6 +345,7 @@ class CallOrchestrator:
                 # again (no-op on an already-empty queue).
                 logger.info("Gemini turn interrupted (barge-in) -- clearing playout queue")
                 self._telemetry.record_interrupted(source="gemini")
+                self._barge_in_count += 1
                 self._agent_speaking = False
                 self._publish_source.clear_queue()
                 self._flush_transcript_buffer("agent", interrupted=True)
@@ -362,6 +367,7 @@ class CallOrchestrator:
             return  # caller speaking during their own turn, not an interruption
         logger.info("VAP predicted caller speech onset during agent playback -- clearing playout queue")
         self._telemetry.record_interrupted(source="vap_predictive")
+        self._barge_in_count += 1
         self._agent_speaking = False
         self._publish_source.clear_queue()
         self._flush_transcript_buffer("agent", interrupted=True)
@@ -466,6 +472,14 @@ class CallOrchestrator:
             self._agent_speaking = False
 
         execution_time_ms = (time.monotonic() - started_at) * 1000
+        self._tool_invocations.append(ToolInvocationRecord(
+            tool_name=call.name,
+            input_params=call.args,
+            output_result=result,
+            error=error,
+            latency_ms=execution_time_ms,
+            success=error is None,
+        ))
         log_event(
             "tool_execution_completed",
             self._room.name,
@@ -513,6 +527,7 @@ class CallOrchestrator:
         try:
             await transfer_to_broker(self._lk_api, self._room.name, self._caller_identity, self._broker_phone_number)
             response = {"status": "transferred"}
+            self._call_transferred = True
         except Exception as exc:  # noqa: BLE001 -- always report back to Gemini, even on failure
             logger.exception("SIP transfer to human broker failed")
             response = {"error": str(exc)}
@@ -557,6 +572,16 @@ class CallOrchestrator:
         FALLBACK_SWITCHES.labels(tenant_id=self._tenant_id).inc()
         return True
 
+    def _resolve_call_outcome(self) -> str:
+        if self._call_transferred:
+            return "transferred"
+        tool_names = {inv.tool_name for inv in self._tool_invocations}
+        if "book_site_visit" in tool_names:
+            return "booked"
+        if "update_lead_qualification" in tool_names:
+            return "qualified"
+        return "unknown"
+
     async def aclose(self) -> None:
         # Flush any incomplete utterance still sitting in the per-speaker
         # buffers (e.g. the call ended mid-sentence) so it isn't lost. Done
@@ -592,5 +617,21 @@ class CallOrchestrator:
                 )
             except Exception:
                 logger.exception("Failed to save interaction transcript")
+
+            outcome = self._resolve_call_outcome()
+            try:
+                await save_conversation_data(
+                    database_url=self._database_url,
+                    tenant_id=self._tenant_id,
+                    call_id=self._room.name,
+                    conversation_context=self._conversation_context,
+                    tool_invocations=self._tool_invocations,
+                    duration_seconds=duration_seconds,
+                    barge_in_count=self._barge_in_count,
+                    outcome=outcome,
+                    lead_id=self._lead_id,
+                )
+            except Exception:
+                logger.exception("Failed to save conversation data")
 
         self._telemetry.end()
