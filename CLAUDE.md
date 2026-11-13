@@ -199,10 +199,15 @@ deliberate style. Match it:
   312ms on the 2026-10-09 re-run — noisier but still a small fraction of
   the full-turn number either way). The vocal filler
   (`orchestrator/vocal_filler.py`) *masks* this; it does not fix it.
-- **Fair Housing filter is built and tested but not wired into the live call
-  path** — a genuine open design problem (Gemini starts streaming audio
-  before a transcription is available to check), documented in
-  `services/compliance/README.md`. Don't wire it in naively; read that note.
+- **Fair Housing filter is live-wired** to finished caller transcripts,
+  replacing queued Gemini audio with a pre-recorded redirect. The caller
+  `TranscriptChunk.finished` signal still needs real mic/SIP verification;
+  don't claim reliable live enforcement until that check is done. Details
+  and limitations are in `services/compliance/COMPLIANCE_AND_ESCALATION.md`.
+- **Gemini Live default model is now `gemini-3.8-live`**, with
+  `GEMINI_LIVE_MODEL` configurable. The model migration, session resumption,
+  and context compression have fake-session tests; re-run the real-key and
+  real-audio checks listed in `services/gemini-client/README.md`.
 - **AEC3 (plan PROP-201 / Jira PROP-10) is deliberately not implemented** —
   this architecture has no local mic-hears-speaker loop to cancel. See
   `services/orchestrator/README.md` and `docs/sprint-notes/sprint-2-turn-taking.md`.
@@ -274,6 +279,11 @@ that need their own copy (`services/gemini-client/.env`,
 `INTERNAL_SERVICE_TOKEN`, copy it to all four by hand). The configured
 model, `gemini-3.1-flash-live-preview`, is confirmed available to a plain
 free-tier key — no billing needed.
+
+That model has since been marked legacy by Google. The current default is
+`gemini-3.8-live` (`GEMINI_LIVE_MODEL` remains configurable); prior live
+benchmarks and verification above are historical results for the earlier
+model and are not evidence that the new default has been live-verified.
 
 **Verified for real**: `db/ingestion` + `tool-router`'s real-embedding
 tests (previously skipped), `test_lead_qualification_live.py` (real
@@ -381,13 +391,11 @@ tests and `test_orchestrator_live.py` still pass unchanged.
   from `livekit/rtc/_ffi_client.py`, not this project's code, and doesn't
   affect any test's actual result. Don't mistake it for a new bug if it
   shows up in a log.
-- `infra/livekit/setup_sip_routing.sh` invokes
-  `lk sip dispatch-rule create --config <file>`, but current `lk` CLI
-  docs (checked 2026-10-14) describe `lk sip dispatch create <file>`
-  instead — a likely CLI version drift, same category as the
-  `livekit-agents` API change above. **Not fixed** — no real `lk` CLI is
-  installed here to confirm the actually-correct current syntax against;
-  verify before relying on that script as-is.
+- `infra/livekit/setup_sip_routing.sh` now uses the current documented
+  positional request-file syntax (`lk sip inbound create <file>` and
+  `lk sip dispatch create <file>`). The CLI is not installed here, so
+  commands and payloads still need verification against the actual
+  installed `lk` version before creating production SIP resources.
 
 **A pip install of `livekit-agents` can look stuck when it isn't.** It
 pulls in far more transitive dependencies than anything installed before

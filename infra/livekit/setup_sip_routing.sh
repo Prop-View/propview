@@ -14,9 +14,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Creating inbound SIP trunk..."
-lk sip inbound-trunk create --config "$script_dir/inbound-trunk.json"
+lk sip inbound create "$script_dir/inbound-trunk.json"
 
 echo "Creating dispatch rule (one room per call, prefix 'call-')..."
-lk sip dispatch-rule create --config "$script_dir/dispatch-rule.json"
+lk sip dispatch create "$script_dir/dispatch-rule.json"
 
 echo "Done. Inbound calls to the Twilio DID now land in a LiveKit room named call-<id>."

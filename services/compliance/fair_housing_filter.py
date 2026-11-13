@@ -1,15 +1,13 @@
 """
 PROP-505: Fair Housing compliance filter.
 
-Deterministic, rule-based pre-filter that runs BEFORE a query reaches the
-model -- defense in depth alongside system_prompt.py's instruction-based
-handling, not a replacement for it. Regex/keyword matching cannot
-guarantee catching every creatively-phrased steering question (the
-Sprint Plan's 100% DoD target is realistically achieved by this filter
-catching the common/obvious cases deterministically while the LLM's own
-judgment, guided by the system prompt, handles novel phrasings this
-filter misses). Documented honestly rather than claimed as a complete
-solution.
+Deterministic, rule-based detector used by the orchestrator on completed
+caller transcripts to replace a potentially steering Gemini response
+with a compliant redirect. It complements, rather than replaces,
+system_prompt.py's instruction-based handling. Regex/keyword matching
+cannot guarantee catching every creatively-phrased steering question,
+so the filter's coverage is documented honestly rather than claimed as a
+complete solution.
 
 Detection requires BOTH a protected-class term AND a demographic/steering
 question pattern in the same utterance, to avoid false-flagging ordinary

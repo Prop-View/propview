@@ -17,8 +17,13 @@ and injecting WAV audio into a LiveKit room for each one.
 `../../services/gemini-client/`'s own tests made the same call for the
 same reason. See `harness.py`'s docstring for the full reasoning.
 
-**12 of 15 scenarios implemented** — 3 are excluded, not silently
-skipped (see `scenarios.py`'s docstring for exactly why each one):
+**12 of the original 15 plan scenarios are implemented**, and a
+supplemental first-turn AI disclosure scenario has been added. Three
+original plan scenarios are excluded, not silently skipped (see
+`scenarios.py`'s docstring for exactly why each one is):
+- The supplemental `0_first_turn_ai_disclosure` scenario checks the
+  first agent turn. It requires a real Gemini key and has not yet been
+  live-verified after this addition.
 - **#4** (mid-sentence interruption) needs real audio timing — already
   covered for real by `../../services/orchestrator/tests/test_predictive_barge_in_live.py`.
 - **#10** (SIP REFER transfer) needs a real telephony deployment
@@ -36,7 +41,8 @@ skipped (see `scenarios.py`'s docstring for exactly why each one):
 cd services/tool-router && uvicorn main:app --port 8000 &
 
 cd tests/e2e-voice
-python run_scenarios.py                     # all 12
+python run_scenarios.py                     # all 13, including the supplemental disclosure scenario
+python run_scenarios.py 0_first_turn_ai_disclosure
 python run_scenarios.py 1_simple_inquiry     # one, by name
 ```
 
@@ -51,7 +57,7 @@ exact-match — inherent to grading a real model's response, not a
 shortcut. A failure here is a real signal worth investigating.
 
 **Verified passing** 2026-09-08, live-run against real Gemini + real
-Tool Router + real Postgres: **12/12 scenarios passed**, after fixing
+Tool Router + real Postgres: **12/12 then-existing scenarios passed**, after fixing
 three real bugs the first live run caught (not hypothetical edge cases —
 each one actually broke a scenario before the fix):
 1. `harness.py` fetched only the Tool Router's remote tool schemas,
@@ -81,7 +87,9 @@ instead of guessing — exactly per `bant_conversation_design.md`'s
 "ask one clarifying question if ambiguous" rule. Fixed by adding the
 caller's answer as a second turn.
 
-Running the full 12-scenario matrix (or scaling to the plan's full 50)
+The supplemental first-turn disclosure scenario was unit-tested
+2026-11-13; the historical 12/12 live result does not cover it.
+Running the full current 13-scenario suite (or scaling to the plan's full 50)
 on every commit is a real operational cost/time tradeoff for whoever
 wires this into CI — each live run above took real Gemini API calls.
 
@@ -91,10 +99,12 @@ wires this into CI — each live run above took real Gemini API calls.
       audio-timing half is `test_predictive_barge_in_live.py`; the
       conversational half is scenario coverage here (minus #4, excluded
       for the reason above).
-- [x] 12/15-scenario E2E test runner (PROP-604) — scaling to the plan's
-      full 50 scenarios is straightforward (`scenarios.py`'s `Scenario`
-      objects are the extension point) but not done here.
+- [x] 12/15 original plan scenarios plus one supplemental AI-disclosure
+      scenario (PROP-604); scaling to the plan's full 50 scenarios is
+      straightforward (`scenarios.py`'s `Scenario` objects are the
+      extension point) but not done here.
 - [ ] Literal audio-injection (WAV files into a real WebRTC stream) —
       scope decision, see above.
-- [ ] Full 50-scenario coverage — 12 implemented, 3 explicitly excluded
-      with reasons, scaling further is real content-authoring work.
+- [ ] Full 50-scenario coverage — 12 original scenarios implemented, 3
+      explicitly excluded with reasons, scaling further is real
+      content-authoring work.

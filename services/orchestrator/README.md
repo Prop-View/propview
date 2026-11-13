@@ -144,6 +144,29 @@ filler audio frames on the caller's subscribed track (150 received,
 result resolved. `tests/test_vocal_filler.py` covers the
 play/no-play/cancel logic in isolation with fakes (3/3 passing).
 
+## Fair Housing enforcement (PROP-505)
+
+When a caller's finished transcript matches the deterministic
+Fair Housing filter (`../compliance/fair_housing_filter.py`),
+`CallOrchestrator` clears queued Gemini audio, suppresses remaining
+Gemini audio for that turn, and plays the bundled
+`fair_housing_audio/fair_housing_redirect.wav` clip (24 kHz mono PCM16).
+The playback is tracked, cancelled by barge-in/shutdown, and recorded in
+the persisted call transcript after successful playback. Focused fake
+audio tests cover detection boundaries, playback, suppression, and
+interruption. The clip uses the local macOS `say` voice and may sound
+different from Gemini's selected voice.
+
+**Not verified with live caller audio**: enforcement depends on the
+input `TranscriptChunk.finished` signal. The text-driven harness does
+not exercise caller audio transcription; verify that boundary with a
+real mic/SIP call before relying on the deterministic layer as complete.
+See `../compliance/COMPLIANCE_AND_ESCALATION.md`.
+
+**Unit-verified 2026-11-13**: 6 fake-audio tests cover finish gating,
+redirect playback/persistence, suppression until turn end, and
+interruption cancellation.
+
 ## Human transfer (PROP-503/504)
 
 `transfer_to_human_agent` is a **local** tool — unlike every other tool
@@ -346,6 +369,10 @@ section above for the full result.
       `interactions.transcript` via `transcript_store.py` — the write path
       PROP-506's own README had flagged as missing. `DATABASE_URL` unset
       skips it entirely (safe no-op for local dev without Postgres).
+- [x] Fair Housing matches in finished caller transcripts interrupt
+      queued Gemini audio and play a pre-recorded redirect (PROP-505).
+      Unit-tested; caller-side `finished` behavior still needs real-audio
+      verification before claiming the detector fires for every call.
 - [x] Structured `conversation_turns` and `tool_invocations` are PII-masked
       before Postgres writes. The call's in-process turn snapshot is
       persisted in full, independent of Redis's 200-line live context
