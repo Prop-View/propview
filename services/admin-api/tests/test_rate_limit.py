@@ -88,3 +88,18 @@ async def test_different_limits_for_the_same_tenant_share_one_budget(redis_clien
 
     with pytest.raises(HTTPException):
         await strict(tenant_id)  # same tenant, same window -- already at 2
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reads_have_an_independent_budget(redis_client):
+    tenant_id = unique_tenant_id()
+    writes = rate_limited(limit=1, window_seconds=10)
+    dashboard_reads = rate_limited(limit=1, window_seconds=10, budget="dashboard")
+
+    await writes(tenant_id)
+    await dashboard_reads(tenant_id)
+
+    with pytest.raises(HTTPException):
+        await writes(tenant_id)
+    with pytest.raises(HTTPException):
+        await dashboard_reads(tenant_id)

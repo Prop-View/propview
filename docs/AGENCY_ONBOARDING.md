@@ -26,6 +26,7 @@ other by PROP-601's Row-Level Security.
 cd db/migrations && python apply_migrations.py
 cd ../../services/tool-router && uvicorn main:app --port 8000 &
 cd ../admin-api && uvicorn main:app --port 8001 &
+# Dashboard: cd dashboard && npm run dev (http://localhost:5173)
 ```
 
 ## Stage 1: Partner Onboarding
@@ -131,6 +132,11 @@ TENANT_ID=austin-realty AGENCY_NAME="Austin Realty" python main.py <room-name>
 `TENANT_ID` flows through to every tool call
 (`services/tool-router/README.md`'s API reference), lead capture
 (`services/lead-engine/README.md`), and the RLS-enforced database layer.
+
+The existing React dashboard connects to the Admin API at
+`http://localhost:8001` by default (`dashboard/.env.example`) and runs
+locally at `http://localhost:5173`. Its current API-key login is for
+development; password-based accounts are not yet implemented.
 
 ## Full API / schema reference index
 

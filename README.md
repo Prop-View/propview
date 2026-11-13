@@ -41,7 +41,8 @@ IDs from `Sprint Plan.md`. New tenant? Start at `docs/AGENCY_ONBOARDING.md`.
 
 ## Status
 
-As of 2026-09-14: **51 of 52 tickets Done** (tracked in Jira project
+As of 2026-11-13: the original Sprint Plan work remains **51 of 52 tickets
+Done** (tracked in Jira project
 `PROP`). Everything else is built and tested, either live-verified
 against the real API/service or (where a real third-party account isn't
 available in this environment — Twilio, Google Calendar OAuth, Deepgram,
@@ -97,6 +98,22 @@ either source.
   per-tenant rate limiting (Redis fixed-window counters on both admin-api
   and the Tool Router). All three came directly out of the security
   audit's own findings — see `infra/observability/SECURITY_AUDIT.md`.
+
+- **Product-readiness Phase 0** — the existing React dashboard has
+  tenant-scoped read views for properties, leads, appointments, calls,
+  call details, and dashboard stats. Structured call-turn and tool-call
+  data is persisted with PII masking, durable turn history is not limited
+  to Redis's 200-line live window, and call outcomes only count successful
+  booking/qualification tool calls. The Admin API read routes have an
+  independent rate-limit bucket. See the [dashboard README](dashboard/README.md),
+  [Admin API README](services/admin-api/README.md), and
+  [orchestrator README](services/orchestrator/README.md) for what is
+  implemented and tested.
+
+**Still not a complete self-serve or billable product**: tenant signup,
+user/password accounts, editable dashboard workflows, billing, and
+production GCP deployment are not implemented yet. These are separate
+approved phases, not implied by the original Sprint Plan ticket count.
 
 **The 1 remaining ticket**: PROP-49 (plan `PROP-608`, soft launch pilot
 deployment) — needs an actual real estate agency partner and live inbound

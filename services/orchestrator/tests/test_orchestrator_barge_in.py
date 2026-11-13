@@ -104,6 +104,18 @@ def test_later_chunks_after_barge_in_do_not_bleed_into_the_interrupted_line(orch
     ]
 
 
+def test_call_snapshot_keeps_more_than_redis_context_window(orchestrator):
+    from conversation_context import MAX_LINES
+
+    for index in range(MAX_LINES + 25):
+        orchestrator._transcript_buffer["caller"] = f"caller turn {index}"
+        orchestrator._flush_transcript_buffer("caller")
+
+    assert len(orchestrator._conversation_lines) == MAX_LINES + 25
+    assert orchestrator._conversation_lines[0].text == "caller turn 0"
+    assert orchestrator._conversation_lines[-1].text == f"caller turn {MAX_LINES + 24}"
+
+
 @pytest.mark.asyncio
 async def test_barge_in_pushes_to_conversation_context_when_configured():
     from unittest.mock import AsyncMock
@@ -119,8 +131,14 @@ async def test_barge_in_pushes_to_conversation_context_when_configured():
     await asyncio.gather(*orch._tasks)
 
     context_store.append_line.assert_awaited_once_with(
-        "test-room", "agent", "This house has four bed", interrupted=True
+        "test-room",
+        "agent",
+        "This house has four bed",
+        interrupted=True,
+        timestamp=orch._conversation_lines[0].timestamp,
     )
+    assert orch._conversation_lines[0].text == "This house has four bed"
+    assert orch._conversation_lines[0].interrupted is True
 
 
 def test_no_conversation_context_configured_does_not_error(orchestrator):
@@ -131,3 +149,37 @@ def test_no_conversation_context_configured_does_not_error(orchestrator):
     orchestrator._handle_predictive_speech_start()
 
     assert orchestrator._tasks == []
+
+
+def test_failed_booking_does_not_mark_call_as_booked(orchestrator):
+    from conversation_store import ToolInvocationRecord
+
+    orchestrator._tool_invocations = [
+        ToolInvocationRecord(
+            tool_name="book_site_visit",
+            input_params={},
+            output_result={"error": "calendar unavailable"},
+            error="calendar unavailable",
+            latency_ms=20,
+            success=False,
+        )
+    ]
+
+    assert orchestrator._resolve_call_outcome() == "unknown"
+
+
+def test_successful_booking_marks_call_as_booked(orchestrator):
+    from conversation_store import ToolInvocationRecord
+
+    orchestrator._tool_invocations = [
+        ToolInvocationRecord(
+            tool_name="book_site_visit",
+            input_params={},
+            output_result={"appointment_id": 1},
+            error=None,
+            latency_ms=20,
+            success=True,
+        )
+    ]
+
+    assert orchestrator._resolve_call_outcome() == "booked"

@@ -13,6 +13,10 @@ cp .env.example .env
 uvicorn main:app --reload --port 8001
 ```
 
+The local dashboard runs at `http://localhost:5173` and the Admin API at
+`http://localhost:8001`. `CORS_ORIGINS` in `.env.example` matches the
+Vite default; update it if the dashboard is served from another origin.
+
 ## Auth
 
 Closes `infra/observability/SECURITY_AUDIT.md` section 3's "no
@@ -40,12 +44,15 @@ invalidates its previous key immediately.
 
 Closes `infra/observability/SECURITY_AUDIT.md` section 4's "no rate
 limiting anywhere" finding for this service. `rate_limit.py`: 30
-requests / 60s per `tenant_id`, shared across every tenant-scoped route
-below (one budget for the tenant overall, not per-route), plus a
-separate, much tighter 5 requests / 60s budget just for `/provision`
+requests / 60s per `tenant_id` for normal tenant-scoped operations, plus a
+separate dashboard-read bucket defaulting to 300 requests / 60s per
+tenant, and a 5 requests / 60s limit for `/provision`
 (mints/rotates a tenant's credential — a materially more sensitive
-action than a listing upload). Configurable via
-`RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW`/`RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW`/
+action than a listing upload). Dashboard reads do not consume the normal
+write/API budget. Limits are configurable via
+`RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW`,
+`RATE_LIMIT_DASHBOARD_REQUESTS_PER_WINDOW`,
+`RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW`, and
 `RATE_LIMIT_WINDOW_SECONDS`.
 
 ## API
@@ -78,6 +85,15 @@ PUT /admin/tenants/{tenant_id}/branding
 
 GET /admin/tenants/{tenant_id}/branding
   -> {"agency_name": "Austin Realty"}
+
+GET /admin/tenants/{tenant_id}/properties
+GET /admin/tenants/{tenant_id}/leads
+GET /admin/tenants/{tenant_id}/appointments
+GET /admin/tenants/{tenant_id}/calls
+GET /admin/tenants/{tenant_id}/calls/{call_id}
+GET /admin/tenants/{tenant_id}/stats
+  -- dashboard read endpoints; all data access uses tenant_connection()
+     and is isolated by Postgres RLS.
 
 GET /health
 ```
@@ -114,10 +130,18 @@ rejected with 429, independent tenants have independent budgets, and a
 lower-limit route sharing a budget with an already-incremented
 higher-limit route correctly rejects sooner. Also live-verified against
 real running instances: 35 real calls in a tight loop against the
-configured 30/60s limit (one already consumed by an earlier `/provision`
-call, since the budget is shared across routes) returned exactly 29×200
-then 6×429 — the limit fires at precisely the configured threshold. Full
-suite total is now 21/21.
+then-configured shared 30/60s limit returned exactly 29×200 then 6×429 —
+the limit fired at precisely the configured threshold. Full suite at that
+time was 21/21.
+
+The dashboard read routes have focused integration coverage in
+`tests/test_dashboard_reads.py`, using the real Postgres and Redis
+services. It exercises all six routes and verifies a call belonging to
+another tenant is not readable. The independent dashboard bucket has a
+separate Redis-backed limit test in `tests/test_rate_limit.py`.
+**Verified passing 2026-11-13**: the focused dashboard-read, rate-limit,
+and Admin API regression selection passed 27/27 tests against real
+Postgres and Redis.
 
 ## Definition of Done (from Sprint Plan)
 
@@ -127,3 +151,5 @@ suite total is now 21/21.
       keys, see "Auth" above. Closes the gap
       `infra/observability/SECURITY_AUDIT.md` flagged as the platform's
       single biggest security finding.
+- [x] Tenant-scoped dashboard read endpoints and a separate read-rate
+      budget. See the API and Testing sections above.

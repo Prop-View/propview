@@ -60,8 +60,8 @@ Rules:
   with `FORCE ROW LEVEL SECURITY`. Connecting as `postgres` makes every
   tenant-isolation test pass *vacuously* — it proves nothing and hides a
   real leak. The role is created by `db/migrations/000_create_app_role.sql`.
-- **Every query goes through `tenant_connection()`** (`db.py` in tool-router
-  and admin-api), which runs
+- **Every query goes through `tenant_connection()`** (`db.py` in
+  tool-router, admin-api, and orchestrator), which runs
   `SELECT set_config('app.tenant_id', $1, true)` inside the transaction.
   RLS here is **fail-closed**: a connection that never sets the tenant sees
   zero rows, not all rows. Never use a raw connection for tenant data.
@@ -488,3 +488,25 @@ and one genuine gap with no prior trace anywhere (not even a DoD line):
   already lists — `test_rate_limit.py` couldn't even be collected
   without it. Unrelated to this round's actual changes, just blocking
   verification of them.
+
+## 14. Product-readiness Phase 0 (2026-11-13)
+
+- Structured call data uses the compliance `mask_pii()` helper before
+  persisting conversation turns, tool input/output, or tool errors.
+  `services/orchestrator/mask_existing_conversation_pii.py` backfills
+  already-stored rows for one explicit `--tenant-id` at a time; it uses
+  the orchestrator's RLS-scoped `tenant_connection()` and requires
+  `DATABASE_URL` to use `propview_app`.
+- Redis retains its bounded 200-line live context window. The orchestrator
+  separately retains the current call's full structured turn list for
+  end-of-call Postgres persistence, so the durable `conversation_turns`
+  table is not truncated to Redis's recent window.
+- Only successful `book_site_visit` and `update_lead_qualification`
+  invocations affect the call outcome. Migration `010` removes the
+  unused `dropped`/`nurture` values from `call_analytics.outcome`.
+- Admin API dashboard reads have an independent per-tenant Redis budget
+  (300 requests per 60 seconds by default); they do not consume the
+  write/API budget.
+- The local Admin API port is 8001 and the Vite dashboard origin is
+  `http://localhost:5173`. Keep those aligned in docs and
+  `dashboard/.env.example`.

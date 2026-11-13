@@ -60,6 +60,11 @@ national origin, etc.) alongside specific instances.
 (`PERSON`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `CREDIT_CARD`, `US_SSN`,
 `US_BANK_NUMBER`) in transcripts before they're stored in
 `interactions.transcript` (`db/migrations/003_crm_schema.sql`).
+The orchestrator also masks structured `conversation_turns` text and
+string values in `tool_invocations` before storage. Existing structured
+rows can be masked per tenant with
+`services/orchestrator/mask_existing_conversation_pii.py`; see the
+orchestrator README for the command and database-role requirements.
 
 Presidio's built-in recognizers are already a regex+NLP hybrid (phone/
 email/credit-card/SSN are regex-based; `PERSON` uses spaCy NER) — that
@@ -102,6 +107,8 @@ fixed by using a non-placeholder number in the test.
       first written): Gemini's speech transcription feeds a per-call
       buffer, masked via this module and persisted when the call ends.
       See `../orchestrator/README.md`'s transcript section.
+- [x] Also wired into structured conversation and tool-invocation writes,
+      with a tenant-scoped backfill for existing rows; see above.
 
 ---
 
