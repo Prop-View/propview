@@ -124,6 +124,10 @@ secrets).
 | `PLATFORM_OPERATOR_TOKEN` | **Yes, no default** | Gates `POST /admin/tenants/{id}/provision` — held only by whoever operates this platform, **never** given to an agency. Not shared with any other service. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Service refuses to authenticate anyone (500) if unset. |
 | `REDIS_URL` | Has a local default | `redis://localhost:6379` if unset. Backs per-tenant rate limiting. |
 | `RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW` / `RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW` / `RATE_LIMIT_WINDOW_SECONDS` | No | Defaults `30` / `5` requests per `60` seconds. See section 4.3. |
+| `SMTP_HOST` / `SMTP_FROM` | Required for account emails | Provider-agnostic email adapter uses SMTP by default for verification, password reset, and account invitations. `SMTP_PORT`, auth credentials, and STARTTLS are configurable. |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` / `GOOGLE_OAUTH_STATE_SECRET` | Required for browser Calendar connect | Register the exact redirect URI in Google Cloud; state is signed, tenant-bound, expiring, and single-use. |
+| `GEMINI_API_KEY` | Required for Admin API knowledge-document uploads | Same key used by the ingestion service; PDF/TXT/Markdown are accepted. |
+| `SESSION_TTL_SECONDS` / `DASHBOARD_BASE_URL` | No | Account sessions default to 8 hours; email links use `http://localhost:5173` by default. |
 
 **`db/migrations/.env`** — schema setup (run once)
 | Var | Required? | Notes |
@@ -194,9 +198,10 @@ different Google account.
 
 The existing React dashboard is in `dashboard/`. Start the Admin API on
 port 8001 and the dashboard on Vite's default port 5173; its
-`VITE_API_URL` default points to `http://localhost:8001`. The dashboard
-currently uses tenant API keys; self-serve account login is not yet
-implemented.
+`VITE_API_URL` default points to `http://localhost:8001`. Self-service
+signup, email verification, password login/reset, team invitations, and
+short-lived sessions are implemented in the Admin API. The web dashboard
+still uses its legacy API-key flow pending Phase 4 integration.
 
 ### 3.1 Onboard a new tenant (agency)
 
@@ -228,6 +233,11 @@ curl -X PUT localhost:8001/admin/tenants/austin-realty/calendar-credentials \
 
 For unstructured docs (brochures, FAQs) the agent should be able to
 answer from, use `db/ingestion/` instead — see its own README.
+Set the per-tenant voice, greeting, sender numbers, time zone, business
+hours, and broker transfer number with the
+`PUT /admin/tenants/{tenant_id}/settings` endpoint; see the onboarding
+guide for its request shape. Map the tenant's inbound E.164 number through
+the platform phone-number endpoint there as well.
 
 ### 3.2 Run a call
 
@@ -237,16 +247,18 @@ cd db/migrations && python apply_migrations.py
 cd ../../services/tool-router && uvicorn main:app --port 8000 &
 cd ../admin-api && uvicorn main:app --port 8001 &
 
-# One call, for one tenant:
+# Manual local test call, for one tenant:
 cd services/orchestrator
 TENANT_ID=austin-realty python main.py <room-name>
 ```
 
 `main.py` is deliberately a "one process, one call" entrypoint today —
 it joins the named LiveKit room and bridges it to Gemini for that call's
-lifetime. It does not yet auto-dispatch onto every new inbound SIP call;
-that needs LiveKit's Agent Worker / job-dispatch system, wired in once a
-real telephony deployment (section 5) exists to dispatch against.
+lifetime. Production inbound calls use `services/orchestrator/worker.py`;
+it resolves each caller from the dialed E.164 number in the platform
+registry and ends the call when it cannot resolve an active tenant. The
+worker dispatch mechanics have been exercised, but real SIP-originated
+resolution still needs telephony credentials and live verification.
 `AGENCY_NAME`/branding is looked up per-tenant automatically (section
 2.4) — you don't need to pass it on the command line.
 

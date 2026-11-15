@@ -5,6 +5,8 @@ created by the orchestrator/tool-router during live calls, not the Admin API).
 Run: PLATFORM_OPERATOR_TOKEN=<token> python -I seed.py
 Requires: Admin API running on port 8001, Postgres running.
 Set PLATFORM_OPERATOR_TOKEN env var (from services/admin-api/.env).
+The machine API key returned during provisioning is used only in memory to
+seed the sample data; it is not printed or saved for browser login.
 """
 
 import asyncio
@@ -12,7 +14,6 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import asyncpg
 import httpx
@@ -37,7 +38,6 @@ async def main():
     if r.status_code == 200:
         api_key = r.json()["admin_api_key"]
         print(f"  Tenant: {TENANT_ID}")
-        print(f"  API Key: {api_key}")
     else:
         print(f"  Provision failed: {r.status_code} {r.text}")
         sys.exit(1)
@@ -259,15 +259,8 @@ async def main():
     finally:
         await conn.close()
 
-    creds_path = Path(__file__).parent / ".dashboard-credentials"
-    creds_path.write_text(
-        f"TENANT_ID={TENANT_ID}\nAPI_KEY={api_key}\n"
-        f"DASHBOARD=http://localhost:5173\nAPI={API_BASE}\n"
-    )
-    print()
-    print(f"Credentials saved to {creds_path}")
     print(
-        "Open http://localhost:5173 and use the tenant ID and API key from that file."
+        "Seed complete. Create and verify an agency account through the dashboard signup flow before signing in."
     )
 
 

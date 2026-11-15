@@ -41,14 +41,18 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"
 from livekit import api, rtc  # noqa: E402
 
 from conversation_context import ConversationContextStore  # noqa: E402
+from db import tenant_connection  # noqa: E402
 from gemini_live_client import GeminiLiveSession  # noqa: E402
 from health_monitor import HealthMonitor  # noqa: E402
-from tenant_branding import get_agency_name  # noqa: E402
 from orchestrator import CallOrchestrator, build_gemini_tools  # noqa: E402
 from session_store import SessionStore  # noqa: E402
 from system_prompt import build_system_prompt  # noqa: E402
 from tool_client import ToolRouterClient  # noqa: E402
 from vap_processor import SpeechActivityDetector  # noqa: E402
+from tenant_settings import get_tenant_call_settings  # noqa: E402
+
+sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))
+from usage_metering import record_usage_event  # noqa: E402
 
 logger = logging.getLogger("call_session")
 
@@ -60,9 +64,6 @@ TOOL_ROUTER_URL = os.environ.get("TOOL_ROUTER_URL", "http://localhost:8000")
 DATABASE_URL = os.environ.get("DATABASE_URL")  # optional -- transcript saving skipped if unset
 AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 ENABLE_PREDICTIVE_BARGE_IN = os.environ.get("ENABLE_PREDICTIVE_BARGE_IN", "true").lower() != "false"
-# PROP-503/504 -- unset skips transfer setup entirely (transfer_to_human_agent
-# then replies with a "not available" error rather than failing the call).
-BROKER_PHONE_NUMBER = os.environ.get("BROKER_PHONE_NUMBER")
 # PROP-501/502 -- all three unset skips the cascaded fallback entirely (a
 # session error/latency spike just ends the call, as it did before this existed).
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
@@ -72,7 +73,7 @@ CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID")
 FALLBACK_LATENCY_THRESHOLD_MS = float(os.environ.get("FALLBACK_LATENCY_THRESHOLD_MS", "1200"))
 
 
-def _build_fallback_session_factory(agency_name: str):
+def _build_fallback_session_factory(agency_name: str, greeting: str):
     """None if the fallback isn't fully configured. Deliberately imports
     CascadedFallbackSession lazily, inside here -- so a deployment that
     never sets these env vars doesn't need deepgram-sdk/openai/cartesia
@@ -94,7 +95,7 @@ def _build_fallback_session_factory(agency_name: str):
             openai_api_key=OPENAI_API_KEY,
             cartesia_api_key=CARTESIA_API_KEY,
             cartesia_voice_id=CARTESIA_VOICE_ID,
-            system_prompt=build_system_prompt(agency_name),
+            system_prompt=build_system_prompt(agency_name, greeting=greeting),
         )
         await session.__aenter__()
         return session
@@ -139,16 +140,21 @@ async def run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
     # _build_fallback_session_factory() below, so the fallback session (if
     # it's ever switched to mid-call) speaks under the same agency name as
     # the primary one, not a stale env-var default.
-    agency_name = AGENCY_NAME
-    if DATABASE_URL is not None:
-        agency_name = await get_agency_name(DATABASE_URL, tenant_id, default=AGENCY_NAME)
+    tenant_settings = await get_tenant_call_settings(tenant_id, DATABASE_URL)
+    agency_name = tenant_settings.agency_name
 
-    lk_api = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) if BROKER_PHONE_NUMBER else None
-    fallback_session_factory = _build_fallback_session_factory(agency_name)
+    lk_api = (
+        api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        if tenant_settings.broker_transfer_number
+        else None
+    )
+    fallback_session_factory = _build_fallback_session_factory(agency_name, tenant_settings.greeting)
     health_monitor = HealthMonitor(latency_threshold_ms=FALLBACK_LATENCY_THRESHOLD_MS) if fallback_session_factory else None
 
     async with GeminiLiveSession(
-        system_instruction=build_system_prompt(agency_name), tools=gemini_tools
+        system_instruction=build_system_prompt(agency_name, greeting=tenant_settings.greeting),
+        tools=gemini_tools,
+        voice_name=tenant_settings.voice_name,
     ) as gemini_session:
         # One detector per call -- its VADIterator carries hysteresis state
         # across audio windows, so it must not be shared between calls.
@@ -162,7 +168,8 @@ async def run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
             tenant_id=tenant_id,
             vad_detector=vad_detector,
             lk_api=lk_api,
-            broker_phone_number=BROKER_PHONE_NUMBER,
+            broker_phone_number=tenant_settings.broker_transfer_number,
+            sms_sender_number=tenant_settings.sms_sender_number,
             health_monitor=health_monitor,
             fallback_session_factory=fallback_session_factory,
             conversation_context=conversation_context,
@@ -173,11 +180,24 @@ async def run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
         try:
             await call_ended.wait()
         finally:
-            await orchestrator.aclose()
-            await session_store.aclose()
-            await conversation_context.aclose()
-            if lk_api is not None:
-                await lk_api.aclose()
-            if room.isconnected():
-                await room.disconnect()
-            logger.info("Call ended, cleaned up (room=%r tenant=%r)", room.name, tenant_id)
+            try:
+                await orchestrator.aclose()
+            finally:
+                try:
+                    if DATABASE_URL is not None:
+                        async with tenant_connection(tenant_id, DATABASE_URL) as connection:
+                            await record_usage_event(
+                                connection,
+                                tenant_id,
+                                "call",
+                                room.name,
+                                metadata={"room_name": room.name},
+                            )
+                finally:
+                    await session_store.aclose()
+                    await conversation_context.aclose()
+                    if lk_api is not None:
+                        await lk_api.aclose()
+                    if room.isconnected():
+                        await room.disconnect()
+                    logger.info("Call ended, cleaned up (room=%r tenant=%r)", room.name, tenant_id)

@@ -31,12 +31,8 @@ instead of silently losing it. The no-show status flip itself is
 idempotent and intentionally decoupled from the ledger -- see
 `_scan_no_shows`'s query comment.
 
-**FOLLOWUP_TENANT_IDS** (comma-separated, default `"default"`) is a
-deliberate simplification, not a real multi-tenant tenant registry.
-There's no RLS-safe way to enumerate tenant_ids without a raw connection
-bypassing tenant isolation (see CLAUDE.md section 2), and nothing else in
-this repo has solved that either -- TENANT_ID is a single env var
-everywhere else too. Revisit when real multi-tenant production exists.
+Active tenants are enumerated through the restricted platform registry
+function; tenant data is still accessed only through `tenant_connection()`.
 """
 
 from __future__ import annotations
@@ -57,7 +53,9 @@ load_dotenv()
 
 from db import close_pool, tenant_connection  # noqa: E402
 from sms_dispatch import SmsDispatchError, build_no_show_followup, build_nurture_followup, send_sms  # noqa: E402
-from tenant_branding import get_agency_name  # noqa: E402
+from tenant_registry import list_active_tenant_ids  # noqa: E402
+from tenant_settings import get_tenant_call_settings  # noqa: E402
+from usage_metering import record_usage_event  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("followup_scan")
@@ -66,16 +64,11 @@ NO_SHOW_DELAY_HOURS = float(os.environ.get("NO_SHOW_FOLLOWUP_DELAY_HOURS", "1"))
 NURTURE_DELAY_DAYS = float(os.environ.get("NURTURE_FOLLOWUP_DELAY_DAYS", "2"))
 DEFAULT_AGENCY_NAME = os.environ.get("AGENCY_NAME", "our brokerage")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-TENANT_IDS = [t.strip() for t in os.environ.get("FOLLOWUP_TENANT_IDS", "default").split(",") if t.strip()]
 
 
-async def _resolve_agency_name(tenant_id: str) -> str:
-    if DATABASE_URL is None:
-        return DEFAULT_AGENCY_NAME
-    return await get_agency_name(DATABASE_URL, tenant_id, default=DEFAULT_AGENCY_NAME)
-
-
-async def _scan_no_shows(tenant_id: str, agency_name: str) -> int:
+async def _scan_no_shows(
+    tenant_id: str, agency_name: str, sms_sender_number: str | None = None
+) -> int:
     """Flips overdue `scheduled` appointments to `no_show` and sends one
     re-contact SMS per appointment.
 
@@ -113,10 +106,17 @@ async def _scan_no_shows(tenant_id: str, agency_name: str) -> int:
                 row["appointment_id"],
             )
             try:
-                await send_sms(row["phone_number"], build_no_show_followup(agency_name))
+                sms_kwargs = {"from_number": sms_sender_number} if sms_sender_number else {}
+                await send_sms(row["phone_number"], build_no_show_followup(agency_name), **sms_kwargs)
             except SmsDispatchError as exc:
                 logger.warning("No-show SMS failed for appointment %s: %s", row["appointment_id"], exc)
                 continue
+            await record_usage_event(
+                conn,
+                tenant_id,
+                "sms",
+                f"follow-up:no-show:{row['appointment_id']}",
+            )
             await conn.execute(
                 "INSERT INTO follow_ups (tenant_id, lead_id, appointment_id, kind) VALUES ($1, $2, $3, 'no_show')",
                 tenant_id,
@@ -127,7 +127,9 @@ async def _scan_no_shows(tenant_id: str, agency_name: str) -> int:
     return sent
 
 
-async def _scan_nurture(tenant_id: str, agency_name: str) -> int:
+async def _scan_nurture(
+    tenant_id: str, agency_name: str, sms_sender_number: str | None = None
+) -> int:
     """Finds leads with at least one completed call, no appointment ever
     booked (any status -- a lead that booked and then no-showed belongs
     to the no-show pass instead, not nurture), and whose most recent
@@ -156,10 +158,17 @@ async def _scan_nurture(tenant_id: str, agency_name: str) -> int:
         )
         for row in rows:
             try:
-                await send_sms(row["phone_number"], build_nurture_followup(agency_name))
+                sms_kwargs = {"from_number": sms_sender_number} if sms_sender_number else {}
+                await send_sms(row["phone_number"], build_nurture_followup(agency_name), **sms_kwargs)
             except SmsDispatchError as exc:
                 logger.warning("Nurture SMS failed for lead %s: %s", row["lead_id"], exc)
                 continue
+            await record_usage_event(
+                conn,
+                tenant_id,
+                "sms",
+                f"follow-up:nurture:{row['lead_id']}",
+            )
             await conn.execute(
                 "INSERT INTO follow_ups (tenant_id, lead_id, kind) VALUES ($1, $2, 'nurture')",
                 tenant_id,
@@ -170,11 +179,19 @@ async def _scan_nurture(tenant_id: str, agency_name: str) -> int:
 
 
 async def run_scan() -> dict[str, dict[str, int]]:
+    if DATABASE_URL is None:
+        raise RuntimeError("DATABASE_URL must be configured to enumerate active tenants")
+
     results: dict[str, dict[str, int]] = {}
-    for tenant_id in TENANT_IDS:
-        agency_name = await _resolve_agency_name(tenant_id)
-        no_show_count = await _scan_no_shows(tenant_id, agency_name)
-        nurture_count = await _scan_nurture(tenant_id, agency_name)
+    tenant_ids = await list_active_tenant_ids(DATABASE_URL)
+    for tenant_id in tenant_ids:
+        settings = await get_tenant_call_settings(tenant_id, DATABASE_URL, DEFAULT_AGENCY_NAME)
+        no_show_count = await _scan_no_shows(
+            tenant_id, settings.agency_name, settings.sms_sender_number
+        )
+        nurture_count = await _scan_nurture(
+            tenant_id, settings.agency_name, settings.sms_sender_number
+        )
         results[tenant_id] = {"no_show": no_show_count, "nurture": nurture_count}
         logger.info(
             "tenant=%r no_show_followups_sent=%d nurture_followups_sent=%d",

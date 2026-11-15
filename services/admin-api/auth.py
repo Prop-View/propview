@@ -23,10 +23,20 @@ import hashlib
 import hmac
 import os
 import secrets
+from dataclasses import dataclass
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 
 from db import tenant_connection
+
+
+@dataclass(frozen=True)
+class AuthPrincipal:
+    tenant_id: str
+    user_id: int | None
+    role: str | None
+    auth_type: str
+    session_token_hash: str | None = None
 
 
 def generate_api_key() -> str:
@@ -56,7 +66,9 @@ async def require_platform_token(authorization: str | None = Header(default=None
         raise HTTPException(status_code=401, detail="Invalid platform operator token")
 
 
-async def require_tenant_auth(tenant_id: str, authorization: str | None = Header(default=None)) -> None:
+async def require_tenant_auth(
+    tenant_id: str, authorization: str | None = Header(default=None)
+) -> AuthPrincipal:
     """Gates every tenant-scoped admin-api route. The token must both be
     valid AND belong to *this* tenant_id -- a key provisioned for one
     tenant must not authenticate requests for another, which is the
@@ -66,6 +78,27 @@ async def require_tenant_auth(tenant_id: str, authorization: str | None = Header
     token = authorization.removeprefix("Bearer ")
 
     async with tenant_connection(tenant_id) as conn:
+        session = await conn.fetchrow(
+            """
+            SELECT s.user_id, u.role
+            FROM account_sessions AS s
+            JOIN account_users AS u
+              ON u.id = s.user_id AND u.tenant_id = s.tenant_id
+            WHERE s.tenant_id = $1 AND s.token_hash = $2
+              AND s.revoked_at IS NULL AND s.expires_at > now()
+              AND u.is_active AND u.email_verified_at IS NOT NULL
+            """,
+            tenant_id,
+            hashlib.sha256(token.encode()).hexdigest(),
+        )
+        if session is not None:
+            return AuthPrincipal(
+                tenant_id=tenant_id,
+                user_id=session["user_id"],
+                role=session["role"],
+                auth_type="session",
+                session_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            )
         row = await conn.fetchrow(
             "SELECT admin_api_key_hash FROM tenant_settings WHERE tenant_id = $1", tenant_id
         )
@@ -76,3 +109,31 @@ async def require_tenant_auth(tenant_id: str, authorization: str | None = Header
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not hmac.compare_digest(hash_key(token), row["admin_api_key_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    return AuthPrincipal(tenant_id=tenant_id, user_id=None, role=None, auth_type="api_key")
+
+
+async def require_owner(principal: AuthPrincipal = Depends(require_tenant_auth)) -> AuthPrincipal:
+    """Require an authenticated human owner for account administration."""
+    if principal.auth_type != "session" or principal.role != "owner":
+        raise HTTPException(status_code=403, detail="Owner session required")
+    return principal
+
+
+async def require_machine_api_key(
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+) -> AuthPrincipal:
+    """Keep long-lived API keys off browser-only credential read routes."""
+    if principal.auth_type != "api_key":
+        raise HTTPException(status_code=403, detail="Machine API key required")
+    return principal
+
+
+async def require_owner_or_machine(
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+) -> AuthPrincipal:
+    """Allow an agency owner or machine integration, but not an agent session."""
+    if principal.auth_type == "api_key":
+        return principal
+    if principal.role != "owner":
+        raise HTTPException(status_code=403, detail="Owner session required")
+    return principal

@@ -46,14 +46,24 @@ failed send on one run would permanently exclude that appointment from
 ever being retried, since the row would no longer match
 `status = 'scheduled'` on the next pass.
 
-## Known simplification: `FOLLOWUP_TENANT_IDS`
+## Tenant enumeration, settings, and usage
 
-There's no way to list every tenant_id without a raw connection
-bypassing RLS (`CLAUDE.md` section 2), and nothing else in this repo has
-solved that either — `TENANT_ID` is a single env var everywhere else
-too. `FOLLOWUP_TENANT_IDS` (comma-separated, default `"default"`) is the
-same category of simplification, not a real tenant registry. Revisit
-when real multi-tenant production exists.
+The scan enumerates active tenants through
+`platform_list_active_tenants()`, a restricted `SECURITY DEFINER`
+function. The function owner can access only the platform registry
+tables; it cannot bypass tenant-table RLS. Every tenant's follow-up query
+still runs inside `tenant_connection()`.
+
+The agency name and SMS sender are read from that tenant's
+`tenant_settings` row. `AGENCY_NAME`, `BUSINESS_TIME_ZONE`, and business
+hours in `.env` are local-development fallbacks, not a tenant list.
+Every successfully sent follow-up SMS is recorded in `usage_events`
+under a stable source ID, while failed sends remain retryable and are not
+metered.
+
+The script remains a one-shot scheduler entrypoint:
+`python followup_scan.py`. An external scheduler can invoke it
+periodically; this repository does not deploy or configure that scheduler.
 
 ## Testing
 
@@ -86,11 +96,12 @@ but isn't funded; see `CLAUDE.md`'s Phase 3 notes).
 - [x] Dedup ledger (`follow_ups`) preventing double-sends, with a
       retry-safe design verified against the Twilio-not-funded case this
       environment is actually in today.
+- [x] Active tenants enumerated through the protected platform registry;
+      per-tenant settings and successful SMS usage are read/written under
+      tenant-scoped connections.
 - [ ] Real scheduler/cron wiring — this is a one-shot script by design
       for now (see above); deploying it on a recurring trigger is a later
       infra step, not part of this work.
 - [ ] Live-verified against a real, funded Twilio account — blocked on
       the same account-funding step as the rest of Phase 3's telephony
       work.
-- [ ] Real multi-tenant tenant enumeration — `FOLLOWUP_TENANT_IDS` is a
-      documented simplification, not a registry (see above).

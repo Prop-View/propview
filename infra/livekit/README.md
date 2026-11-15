@@ -98,28 +98,22 @@ into it.
 ```json
 "roomConfig": {
   "agents": [
-    { "agentName": "propview-agent", "metadata": "{\"tenant_id\": \"default\"}" }
+    { "agentName": "propview-agent" }
   ]
 }
 ```
 
-**Multi-tenant production needs one dispatch rule per tenant, not this
-one shared file.** `metadata` here is a static string baked into the rule
-itself — it's the same for every call this *specific* rule routes, which
-is exactly right if each tenant (agency) has its own dedicated Twilio
-DID/trunk (the model `docs/AGENCY_ONBOARDING.md` already assumes): one
-dispatch rule per tenant, each with that tenant's own `tenant_id` in
-`metadata`, each presumably tied to a different inbound trunk. This
-checked-in file is the single-tenant/dev-default case, not a template to
-edit in place for a second tenant — copy it per tenant instead once
-there's more than one.
+One shared dispatch rule can serve multiple tenants. The worker resolves
+the tenant from the inbound SIP participant's dialed-number attribute,
+then looks up that number in the platform phone-number registry; it does
+not trust dispatch metadata or fall back to a default tenant. Add each
+tenant's E.164 DID through the platform endpoint documented in
+`../../docs/AGENCY_ONBOARDING.md`.
 
-**Not verified end-to-end against a real SIP call** — proven instead
-against the explicit-dispatch API (`lk.agent_dispatch.create_dispatch()`,
-not a SIP-originated room), which exercises the identical dispatch
-mechanism this rule triggers automatically; see
-`../../services/orchestrator/README.md`'s Auto-dispatch section for that
-result. `setup_sip_routing.sh` now uses the current documented positional
+**Not verified end-to-end against a real SIP call** — the earlier
+explicit-dispatch smoke test verified worker dispatch mechanics but
+provided tenant metadata, so it did not verify the Phase 2 dialed-number
+lookup. `setup_sip_routing.sh` now uses the current documented positional
 request-file commands: `lk sip inbound create <file>` and
 `lk sip dispatch create <file>`. The `lk` executable is not installed in
 this environment, so those commands and the request payloads have not

@@ -27,11 +27,13 @@ import wave
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
+import asyncpg
 from google.genai import types as genai_types
 from livekit import api, rtc
 
 from conversation_context import ContextLine, ConversationContextStore
 from conversation_store import ToolInvocationRecord, save_conversation_data
+from db import tenant_connection
 from gemini_live_client import AudioChunk, Interrupted, ToolCallRequest, TranscriptChunk, TurnComplete
 from human_transfer import transfer_to_broker
 from metrics import FALLBACK_SWITCHES, HUMAN_TRANSFERS, TOOL_CALLS, TOOL_LATENCY_SECONDS
@@ -41,6 +43,7 @@ from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
 from transcript_store import save_interaction
 from vocal_filler import VocalFillerPlayer
+from usage_metering import record_usage_event
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
@@ -117,6 +120,7 @@ class CallOrchestrator:
         filler_delay_seconds: float = DEFAULT_FILLER_DELAY_SECONDS,
         lk_api: api.LiveKitAPI | None = None,
         broker_phone_number: str | None = None,
+        sms_sender_number: str | None = None,
         health_monitor: HealthMonitor | None = None,
         fallback_session_factory: Callable[[], Awaitable[GeminiSessionLike]] | None = None,
         conversation_context: ConversationContextStore | None = None,
@@ -139,6 +143,7 @@ class CallOrchestrator:
         # without transfer configured still degrades gracefully.
         self._lk_api = lk_api
         self._broker_phone_number = broker_phone_number
+        self._sms_sender_number = sms_sender_number
         self._caller_identity: str | None = None
         self._last_lead_snapshot: dict | None = None
         # PROP-501/502: both None disables the cascaded fallback entirely --
@@ -620,12 +625,25 @@ class CallOrchestrator:
             return
 
         try:
-            await send_sms(
+            message_sid = await send_sms(
                 self._broker_phone_number,
                 build_pre_transfer_summary(
                     self._caller_phone_number, reason, self._last_lead_snapshot, self._transcript_lines
                 ),
+                from_number=self._sms_sender_number,
             )
+            if self._database_url is not None:
+                try:
+                    async with tenant_connection(self._tenant_id, self._database_url) as connection:
+                        await record_usage_event(
+                            connection,
+                            self._tenant_id,
+                            "sms",
+                            message_sid,
+                            metadata={"purpose": "pre_transfer"},
+                        )
+                except (asyncpg.PostgresError, OSError):
+                    logger.exception("Pre-transfer SMS succeeded but its usage event could not be recorded")
         except SmsDispatchError:
             logger.exception("Pre-transfer SMS to broker failed -- proceeding with transfer anyway")
 

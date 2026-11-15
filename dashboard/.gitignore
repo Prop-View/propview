@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 .dashboard-credentials
+playwright-report
+test-results
 
 # Editor directories and files
 .vscode/*

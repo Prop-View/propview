@@ -110,10 +110,14 @@ either source.
   [orchestrator README](services/orchestrator/README.md) for what is
   implemented and tested.
 
-**Still not a complete self-serve or billable product**: tenant signup,
-user/password accounts, editable dashboard workflows, billing, and
-production GCP deployment are not implemented yet. These are separate
-approved phases, not implied by the original Sprint Plan ticket count.
+**Still not a complete billable or production product**: the Admin API
+and existing React dashboard now support verified account sessions,
+product edits/uploads, operational settings, calendar connect, webhooks,
+team access, and monthly usage. Dashboard component and Playwright smoke
+tests are in place. Subscription/payment processing and production GCP
+deployment remain later phases; real SMTP, Google OAuth, Gemini document
+embedding, and telephony setup still need human credentials and live
+verification.
 
 **The 1 remaining ticket**: PROP-49 (plan `PROP-608`, soft launch pilot
 deployment) — needs an actual real estate agency partner and live inbound

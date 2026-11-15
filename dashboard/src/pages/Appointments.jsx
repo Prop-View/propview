@@ -28,6 +28,42 @@ export default function Appointments() {
 
   function AppointmentCard({ apt }) {
     const d = new Date(apt.scheduled_at)
+    const [scheduledAt, setScheduledAt] = useState(() => {
+      const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+      return local.toISOString().slice(0, 16)
+    })
+    const [busy, setBusy] = useState(false)
+    const [message, setMessage] = useState('')
+
+    async function saveReschedule() {
+      setBusy(true)
+      setMessage('')
+      try {
+        await api.updateAppointment(apt.id, { scheduled_at: new Date(scheduledAt).toISOString() })
+        setMessage('Appointment rescheduled.')
+        refetch()
+      } catch (requestError) {
+        setMessage(`Could not reschedule: ${requestError.message}`)
+      } finally {
+        setBusy(false)
+      }
+    }
+
+    async function cancel() {
+      if (!window.confirm('Cancel this appointment?')) return
+      setBusy(true)
+      setMessage('')
+      try {
+        await api.cancelAppointment(apt.id)
+        setMessage('Appointment cancelled.')
+        refetch()
+      } catch (requestError) {
+        setMessage(`Could not cancel: ${requestError.message}`)
+      } finally {
+        setBusy(false)
+      }
+    }
+
     return (
       <div className="bg-bg-card rounded-xl border border-border p-4 hover:border-border/80 transition-colors">
         <div className="flex items-start justify-between gap-3">
@@ -63,6 +99,26 @@ export default function Appointments() {
             </div>
           </div>
         </div>
+        {(apt.status === 'scheduled' || apt.status === 'confirmed') && (
+          <div className="mt-4 pt-3 border-t border-border-light flex flex-col sm:flex-row sm:items-end gap-3">
+            <label className="flex-1">
+              <span className="text-[11px] text-text-muted block mb-1">Reschedule to</span>
+              <input
+                type="datetime-local"
+                value={scheduledAt}
+                onChange={(event) => setScheduledAt(event.target.value)}
+                className="w-full px-3 py-2 rounded-lg border border-border bg-bg-card text-[12px]"
+              />
+            </label>
+            <button type="button" disabled={busy || !scheduledAt} onClick={saveReschedule} className="px-3 py-2 rounded-lg bg-accent text-white text-[12px] disabled:opacity-50">
+              {busy ? 'Saving...' : 'Reschedule'}
+            </button>
+            <button type="button" disabled={busy} onClick={cancel} className="px-3 py-2 rounded-lg border border-border text-hot text-[12px] disabled:opacity-50">
+              Cancel appointment
+            </button>
+          </div>
+        )}
+        {message && <p role="status" className={`mt-2 text-[11px] ${message.startsWith('Could not') ? 'text-hot' : 'text-accent'}`}>{message}</p>}
       </div>
     )
   }
