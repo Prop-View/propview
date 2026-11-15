@@ -231,8 +231,11 @@ its piece:
 - Inbound number assignment remains a platform-operator action: carrier
   and LiveKit provisioning must be coordinated and is not exposed to
   agency accounts in the dashboard.
-- Billing/subscriptions are not implemented yet; monthly usage is visible
-  in the dashboard, with payment processing planned for Phase 5.
+- The Phase 5 billing foundation now displays monthly usage, subscription
+  state, and advisory quota warnings. Razorpay checkout is test-mode only
+  and unavailable until an operator configures catalog prices and matching
+  Razorpay test plan IDs. No production billing credentials or plans are
+  configured, and payment/webhook delivery still needs live verification.
 - Real DID provisioning and live SIP-call routing (§2c) still need
   telephony credentials and end-to-end verification.
 - No production scheduler is deployed for follow-up scans, webhook

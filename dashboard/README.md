@@ -49,8 +49,9 @@ password reset also require the Admin API's SMTP settings.
   hours, broker/SMS/WhatsApp numbers, Google Calendar OAuth, webhook
   management, team invitations/deactivation, and knowledge-document
   upload to the Admin API.
-- **Usage & Billing** shows monthly metered usage. Subscription, invoice,
-  and payment management are not available yet; those belong to Phase 5.
+- **Usage & Billing** shows monthly metered usage, plan quotas and advisory
+  warnings, current subscription state, and Razorpay test-mode checkout
+  when the platform operator has configured a plan.
 
 Inbound phone-number routing is intentionally platform-operator managed:
 carrier and LiveKit provisioning must be coordinated, and the dashboard
@@ -61,6 +62,8 @@ the Tool Router, LiveKit, or external provider accounts are healthy.
 Google Calendar OAuth, SMTP delivery, webhook delivery, and document
 embedding still require configured external services and are not claimed
 as live-verified by dashboard tests.
+Razorpay requires test credentials, a configured test plan catalog, and a
+test webhook secret; no live billing credentials or payments are accepted.
 
 ## Development checks
 
@@ -70,6 +73,12 @@ npm run test
 npm run build
 npm run test:e2e
 ```
+
+**Verified 2026-11-15**: lint passed with two existing hook-dependency
+warnings in `src/hooks/useApi.js`; component tests passed 4/4, production
+build passed (with the existing large-chunk warning), and the Playwright
+smoke test passed 1/1. These checks do not contact Razorpay or verify a
+real payment.
 
 The component tests exercise account form behavior with mocked HTTP
 responses. The Playwright smoke test runs the real Vite dashboard and

@@ -6,10 +6,14 @@ remote token endpoint are replaced at their outbound API boundaries.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sys
 import uuid
+import hashlib
+import hmac
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -25,6 +29,7 @@ os.environ.setdefault("RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW", "10000")
 os.environ.setdefault("RATE_LIMIT_DASHBOARD_REQUESTS_PER_WINDOW", "10000")
 
 import accounts
+import billing
 import calendar_oauth
 import event_dispatcher
 import webhooks
@@ -38,6 +43,8 @@ def _tenant_id() -> str:
 
 async def _cleanup_tenant(tenant_id: str) -> None:
     async with tenant_connection(tenant_id) as conn:
+        await conn.execute("DELETE FROM billing_webhook_events WHERE tenant_id = $1", tenant_id)
+        await conn.execute("DELETE FROM billing_subscriptions WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM audit_log WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM email_outbox WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM tenant_webhooks WHERE tenant_id = $1", tenant_id)
@@ -551,3 +558,178 @@ def test_webhook_signing_delivery_log_and_retry(api, monkeypatch):
         return row["status"], row["attempts"]
 
     assert client.portal.call(delivered_state) == ("delivered", 2)
+
+
+def test_billing_summary_is_tenant_scoped_and_usage_limits_are_advisory(api, monkeypatch):
+    client, tenants = api
+    tenant_a, token_a, _ = _signup_and_login(client, tenants, monkeypatch)
+    tenant_b, token_b, _ = _signup_and_login(client, tenants, monkeypatch)
+
+    async def create_subscription() -> None:
+        async with tenant_connection(tenant_a) as conn:
+            await conn.execute(
+                """
+                INSERT INTO billing_subscriptions
+                    (tenant_id, plan_slug, plan_name, provider,
+                     provider_subscription_id, status)
+                VALUES ($1, 'starter', 'Starter', 'razorpay', $2, 'active')
+                """,
+                tenant_a,
+                f"sub_{uuid.uuid4().hex}",
+            )
+
+    client.portal.call(create_subscription)
+    client.headers["Authorization"] = f"Bearer {token_a}"
+    own_summary = client.get(f"/admin/tenants/{tenant_a}/billing")
+    assert own_summary.status_code == 200, own_summary.text
+    assert own_summary.json()["subscription"]["plan_name"] == "Starter"
+
+    client.headers["Authorization"] = f"Bearer {token_b}"
+    other_summary = client.get(f"/admin/tenants/{tenant_b}/billing")
+    assert other_summary.status_code == 200, other_summary.text
+    assert other_summary.json()["subscription"] is None
+
+    warnings = billing.build_usage_warnings(
+        {"calls_limit": 10, "sms_limit": None, "whatsapp_limit": 0},
+        {"call": 8, "sms": 100, "whatsapp": 1},
+    )
+    assert warnings == [
+        {"event_type": "call", "used": 8, "limit": 10, "level": "approaching_limit"},
+        {"event_type": "whatsapp", "used": 1, "limit": 0, "level": "limit_reached"},
+    ]
+
+
+def test_razorpay_webhook_signature_and_event_are_idempotent(api, monkeypatch):
+    client, tenants = api
+    tenant_id, _, _ = _signup_and_login(client, tenants, monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_test_example")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "test-key-secret")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", "test-webhook-secret")
+    subscription_id = f"sub_{uuid.uuid4().hex}"
+
+    async def create_subscription() -> None:
+        async with tenant_connection(tenant_id) as conn:
+            await conn.execute(
+                """
+                INSERT INTO billing_subscriptions
+                    (tenant_id, plan_slug, plan_name, provider,
+                     provider_subscription_id, status)
+                VALUES ($1, 'starter', 'Starter', 'razorpay', $2, 'created')
+                """,
+                tenant_id,
+                subscription_id,
+            )
+
+    client.portal.call(create_subscription)
+    payload = {
+        "event": "subscription.activated",
+        "payload": {
+            "subscription": {
+                "entity": {
+                    "id": subscription_id,
+                    "status": "active",
+                    "notes": {"tenant_id": tenant_id},
+                    "current_start": 1794787200,
+                    "current_end": 1797465600,
+                }
+            }
+        },
+    }
+    raw_body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(b"test-webhook-secret", raw_body, hashlib.sha256).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": signature,
+        "X-Razorpay-Event-Id": f"evt_{uuid.uuid4().hex}",
+    }
+
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_live_example")
+    live_mode = client.post("/webhooks/razorpay", content=raw_body, headers=headers)
+    assert live_mode.status_code == 503
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_test_example")
+
+    invalid = client.post(
+        "/webhooks/razorpay",
+        content=raw_body,
+        headers={**headers, "X-Razorpay-Signature": "bad"},
+    )
+    first = client.post("/webhooks/razorpay", content=raw_body, headers=headers)
+    second = client.post("/webhooks/razorpay", content=raw_body, headers=headers)
+    assert invalid.status_code == 401
+    assert first.status_code == 200 and first.json() == {"status": "processed"}
+    assert second.status_code == 200 and second.json() == {"status": "duplicate"}
+
+    async def subscription_state() -> tuple[str, int]:
+        async with tenant_connection(tenant_id) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT subscription.status,
+                       (SELECT count(*)::int FROM billing_webhook_events AS event
+                        WHERE event.tenant_id = subscription.tenant_id) AS event_count
+                FROM billing_subscriptions AS subscription
+                WHERE subscription.tenant_id = $1
+                  AND subscription.provider_subscription_id = $2
+                """,
+                tenant_id,
+                subscription_id,
+            )
+        return row["status"], row["event_count"]
+
+    assert client.portal.call(subscription_state) == ("active", 1)
+
+
+def test_razorpay_adapter_uses_test_subscription_api(monkeypatch):
+    monkeypatch.setenv("RAZORPAY_SUBSCRIPTION_TOTAL_COUNT", "6")
+    captured = {}
+    response_payload: dict[str, object] = {
+        "id": "sub_test_123",
+        "short_url": "https://rzp.io/test_checkout",
+        "status": "created",
+    }
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return response_payload
+
+    class FakeClient:
+        def __init__(self, *, timeout: float, auth: tuple[str, str]):
+            captured["timeout"] = timeout
+            captured["auth"] = auth
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url: str, *, json: dict):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(billing.httpx, "AsyncClient", FakeClient)
+    provider = billing.RazorpayTestProvider("rzp_test_example", "test-secret")
+    result = asyncio.run(provider.create_subscription("plan_test_123", "sample-agency", "starter"))
+
+    assert result == {
+        "subscription_id": "sub_test_123",
+        "checkout_url": "https://rzp.io/test_checkout",
+        "status": "created",
+    }
+    assert captured["url"] == "https://api.razorpay.com/v1/subscriptions"
+    assert captured["auth"] == ("rzp_test_example", "test-secret")
+    assert captured["json"] == {
+        "plan_id": "plan_test_123",
+        "total_count": 6,
+        "quantity": 1,
+        "customer_notify": True,
+        "notes": {"tenant_id": "sample-agency", "plan_slug": "starter"},
+    }
+    response_payload["status"] = []
+    with pytest.raises(billing.BillingProviderError, match="incomplete subscription response"):
+        asyncio.run(provider.create_subscription("plan_test_123", "sample-agency", "starter"))
+    with pytest.raises(ValueError, match="live credentials"):
+        billing.RazorpayTestProvider("rzp_live_example", "live-secret")

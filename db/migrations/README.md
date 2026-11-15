@@ -85,6 +85,12 @@ closest embedding.
   processing appointment rows, causing real inserts to fail; this
   append-only migration replaces the function without rewriting the
   already-applied `012` migration.
+- **Phase 5 billing** (`014_billing.sql`) adds the platform-managed
+  `billing_plans` catalog (read-only to `propview_app`) and tenant-RLS
+  `billing_subscriptions` and `billing_webhook_events` tables. Plan prices,
+  quotas, and Razorpay test plan IDs are intentionally not invented or
+  seeded; the platform operator configures them in the catalog before
+  checkout can be offered.
 
 - **Row-Level Security** (PROP-601, `004_row_level_security.sql`) enforces
   `tenant_id` isolation on every table above, fail-closed (a connection
@@ -104,7 +110,7 @@ closest embedding.
   before querying — see `services/tool-router/db.py`'s
   `tenant_connection()` for the pattern.
 
-Migrations are append-only (the current sequence follows `012`); do not
+Migrations are append-only (the current sequence follows `014`); do not
 edit an already-applied migration. On a database where a migration has
 already been marked applied, do not rerun it manually. As with other new
 `BIGSERIAL` tables, the app-role sequence grant is explicitly included in

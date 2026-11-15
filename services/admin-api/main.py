@@ -33,6 +33,7 @@ from redis.exceptions import RedisError  # noqa: E402
 
 from accounts import router as accounts_router  # noqa: E402
 from audit import write_audit  # noqa: E402
+from billing import router as billing_router  # noqa: E402
 from auth import (  # noqa: E402
     AuthPrincipal,
     generate_api_key,
@@ -160,6 +161,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
 app.include_router(accounts_router)
+app.include_router(billing_router)
 app.include_router(calendar_oauth_router)
 app.include_router(webhooks_router)
 

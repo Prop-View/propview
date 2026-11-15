@@ -180,6 +180,42 @@ is configured in this repository.
 FastAPI publishes interactive API documentation at `/docs` and the
 OpenAPI schema at `/openapi.json`.
 
+## Billing (Phase 5)
+
+```
+GET  /admin/tenants/{tenant_id}/billing
+POST /admin/tenants/{tenant_id}/billing/subscription
+  {"plan_slug": "agency"}
+POST /webhooks/razorpay
+  X-Razorpay-Signature: <HMAC-SHA256 of the exact raw body>
+  X-Razorpay-Event-Id: <provider event ID, when supplied>
+```
+
+The global `billing_plans` catalog is read-only to `propview_app`;
+platform operators configure its prices, monthly quotas, and Razorpay
+test-plan IDs during deployment. The tenant subscription and webhook
+idempotency ledger use forced RLS. Checkout refuses to run unless
+`RAZORPAY_KEY_ID` has the `rzp_test_` prefix, the key secret exists, and
+the selected catalog plan has a price and test-plan ID. Subscription
+creation is through a provider interface and makes a call only to
+Razorpay's documented `/v1/subscriptions` API.
+
+The webhook endpoint validates `X-Razorpay-Signature` against the exact
+unmodified request bytes with HMAC-SHA256 before reading event data.
+Repeated event IDs are accepted idempotently; status updates are tenant
+scoped. Webhook processing also requires configured Razorpay test-mode
+credentials and rejects live-mode keys. No live credentials, Razorpay
+account, payment, or real provider webhook has been verified.
+
+Current-month `usage_events` are compared with the current plan's call,
+SMS, and WhatsApp quotas. The API returns advisory warnings at 80% and at
+the limit; there is deliberately no blocking path into call handling or
+message delivery. No production prices or quotas are seeded. A test-mode
+checkout remains unavailable until the operator configures catalog rows
+and Razorpay test plan IDs. See the [Razorpay subscription API](https://razorpay.com/docs/api/payments/subscriptions/create-subscription/)
+and [subscription webhook events](https://razorpay.com/docs/webhooks/subscriptions/)
+plus the [webhook signature validation guide](https://razorpay.com/docs/webhooks/validate-test/).
+
 ## Tenant API
 
 All routes below require `Authorization: Bearer <tenant's admin_api_key>`
@@ -317,3 +353,12 @@ claimed as live-verified.
       keys are not stored in browser local storage.
 - [ ] Configure and live-verify SMTP and Google Calendar with real
       provider accounts; run the dispatcher from a production scheduler.
+- [x] Phase 5 billing foundation: test-mode subscription creation, signed
+      idempotent webhooks, and non-enforcing monthly usage warnings.
+      Real Razorpay payments and webhook delivery remain unverified.
+
+**Verified 2026-11-15**: the focused Admin API regression set, including
+billing, passed 31/31 against real Postgres and Redis using the
+`propview_app` role (`NOSUPERUSER NOBYPASSRLS`). Razorpay API calls were
+checked with a fake HTTP boundary; no external payment or webhook was
+claimed as verified.

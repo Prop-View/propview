@@ -147,6 +147,12 @@ export const api = {
   listWebhookDeliveries: (webhookId) =>
     request(tenantPath(`/webhooks/${encodeURIComponent(webhookId)}/deliveries`)),
   getUsage: () => request(tenantPath('/usage/monthly')),
+  getBilling: () => request(tenantPath('/billing')),
+  createSubscription: (planSlug) =>
+    request(tenantPath('/billing/subscription'), {
+      method: 'POST',
+      body: JSON.stringify({ plan_slug: planSlug }),
+    }),
 
   listProperties: (params = {}) => {
     const qs = new URLSearchParams(params).toString()
