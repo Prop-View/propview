@@ -44,6 +44,7 @@ script used to verify this.
 
 from __future__ import annotations
 
+import json
 import atexit
 import logging
 import os
@@ -55,6 +56,7 @@ load_dotenv()
 from livekit import agents, api, rtc
 
 from db import terminate_pool
+from call_lifecycle import WorkerDraining, is_draining
 from call_session import (
     DATABASE_URL,
     LIVEKIT_API_KEY,
@@ -101,6 +103,18 @@ def _get_dialed_number(room: rtc.Room) -> str:
 
 
 async def _resolve_tenant_id(ctx: agents.JobContext) -> str:
+    if os.environ.get("GEMINI_SESSION_MODE", "live").lower() == "fake":
+        if os.environ.get("ENVIRONMENT") != "load":
+            raise TenantResolutionError("Fake Gemini mode is restricted to local load tests")
+        try:
+            metadata = json.loads(ctx.job.metadata or "{}")
+        except json.JSONDecodeError as exc:
+            raise TenantResolutionError("Load-test dispatch metadata must be valid JSON") from exc
+        tenant_id = metadata.get("tenant_id", "default")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise TenantResolutionError("Load-test dispatch metadata needs a tenant_id")
+        return tenant_id
+
     if not DATABASE_URL:
         raise TenantResolutionError("DATABASE_URL is required for inbound tenant resolution")
 
@@ -122,6 +136,10 @@ async def _end_unresolved_call(ctx: agents.JobContext) -> None:
 @server.rtc_session(agent_name=AGENT_NAME)
 async def handle_call(ctx: agents.JobContext) -> None:
     await ctx.connect()
+    if is_draining():
+        logger.info("Rejecting dispatched room %r because the worker is draining", ctx.room.name)
+        await _end_unresolved_call(ctx)
+        return
     try:
         tenant_id = await _resolve_tenant_id(ctx)
     except TenantResolutionError as exc:
@@ -134,7 +152,11 @@ async def handle_call(ctx: agents.JobContext) -> None:
         raise
 
     logger.info("Dispatched into room %r for tenant %r", ctx.room.name, tenant_id)
-    await run_orchestrator_on_room(ctx.room, tenant_id)
+    try:
+        await run_orchestrator_on_room(ctx.room, tenant_id)
+    except WorkerDraining:
+        logger.info("Rejecting dispatched room %r because the worker began draining", ctx.room.name)
+        await _end_unresolved_call(ctx)
 
 
 if __name__ == "__main__":

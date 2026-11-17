@@ -720,7 +720,12 @@ class CallOrchestrator:
 
         for task in in_flight_tasks:
             task.cancel()
-        await asyncio.gather(*in_flight_tasks, *flush_tasks, return_exceptions=True)
+        task_results = await asyncio.gather(*in_flight_tasks, *flush_tasks, return_exceptions=True)
+        if any(
+            isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            for result in task_results
+        ):
+            self._telemetry.record_call_failure()
         if self._session_store is not None:
             await self._session_store.end_session(call_id=self._room.name)
         if self._tool_client is not None:

@@ -81,6 +81,16 @@ async def _seed_dashboard_data(tenant_id: str) -> dict[str, int | str]:
         )
         await conn.execute(
             """
+            INSERT INTO consent_records
+                (tenant_id, contact_id, call_id, purpose, granted, capture_method, evidence)
+            VALUES ($1, $2, $3, 'recording', TRUE, 'verbal', '{"prompt": "recording disclosure"}')
+            """,
+            tenant_id,
+            contact_id,
+            call_id,
+        )
+        await conn.execute(
+            """
             INSERT INTO conversation_turns
                 (tenant_id, call_id, turn_index, speaker, text, timestamp_ms)
             VALUES ($1, $2, 0, 'caller', 'I want to see the house', 1000)
@@ -129,6 +139,9 @@ async def _seed_foreign_call(tenant_id: str, call_id: str) -> None:
 
 async def _cleanup_tenant(tenant_id: str) -> None:
     async with tenant_connection(tenant_id) as conn:
+        await conn.execute("DELETE FROM audit_log WHERE tenant_id = $1", tenant_id)
+        await conn.execute("DELETE FROM consent_records WHERE tenant_id = $1", tenant_id)
+        await conn.execute("DELETE FROM tenant_data_retention WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM tenant_settings WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM call_analytics WHERE tenant_id = $1", tenant_id)
         await conn.execute("DELETE FROM tool_invocations WHERE tenant_id = $1", tenant_id)
@@ -237,3 +250,77 @@ def test_tenant_cannot_read_another_tenants_call(dashboard_client):
         client.portal.call(_cleanup_tenant, other_tenant_id)
 
     assert response.status_code == 404
+
+
+def test_tenant_can_set_and_read_retention_policy(dashboard_client):
+    client, tenant_id, _ = dashboard_client
+
+    before = client.get(f"/admin/tenants/{tenant_id}/privacy/retention")
+    assert before.status_code == 200
+    assert before.json()["retention_days"] is None
+
+    update = client.put(
+        f"/admin/tenants/{tenant_id}/privacy/retention",
+        json={"retention_days": 45},
+    )
+    assert update.status_code == 200
+    assert update.json()["retention_days"] == 45
+
+    after = client.get(f"/admin/tenants/{tenant_id}/privacy/retention")
+    assert after.status_code == 200
+    assert after.json()["retention_days"] == 45
+
+
+def test_tenant_export_includes_data_but_not_credential_material(dashboard_client):
+    client, tenant_id, ids = dashboard_client
+
+    response = client.get(f"/admin/tenants/{tenant_id}/privacy/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["tenant_id"] == tenant_id
+    assert body["data"]["interactions"][0]["call_id"] == ids["call_id"]
+    assert body["data"]["conversation_turns"][0]["text"] == "I want to see the house"
+    assert body["data"]["consent_records"][0]["granted"] is True
+    assert "token_hash" not in response.text
+    assert "embedding" not in body["data"]["conversation_turns"][0]
+    assert "password_hash" not in response.text
+    assert "encrypted_calendar_credentials" not in response.text
+
+
+def test_data_deletion_requires_exact_confirmation_and_suspends_tenant(dashboard_client):
+    client, tenant_id, _ = dashboard_client
+
+    rejected = client.request(
+        "DELETE",
+        f"/admin/tenants/{tenant_id}/privacy/data",
+        json={"confirm_tenant_id": "not-the-tenant"},
+    )
+    assert rejected.status_code == 400
+
+    deleted = client.request(
+        "DELETE",
+        f"/admin/tenants/{tenant_id}/privacy/data",
+        json={"confirm_tenant_id": tenant_id},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["tenant_suspended"] is True
+    assert deleted.json()["deleted_counts"]["interactions"] == 1
+    assert deleted.json()["deleted_counts"]["consent_records"] == 1
+
+    async def verify_erasure_and_suspension():
+        async with tenant_connection(tenant_id) as conn:
+            interaction_count = await conn.fetchval(
+                "SELECT count(*) FROM interactions WHERE tenant_id = $1", tenant_id
+            )
+            status = await conn.fetchval(
+                """
+                SELECT status
+                FROM public.platform_list_tenants()
+                WHERE slug = $1
+                """,
+                tenant_id,
+            )
+        return interaction_count, status
+    assert client.portal.call(verify_erasure_and_suspension) == (0, "suspended")

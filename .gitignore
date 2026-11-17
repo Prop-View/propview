@@ -17,3 +17,10 @@ dump.rdb
 .vscode/
 .mcp.json
 .tools/
+
+# Terraform working data and deployment-specific input/state
+**/.terraform/**
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json

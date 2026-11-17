@@ -41,9 +41,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"
 from livekit import api, rtc  # noqa: E402
 
 from conversation_context import ConversationContextStore  # noqa: E402
+from call_lifecycle import WorkerDraining, active_call_count, register_active_call, unregister_active_call  # noqa: E402
+from cloud_monitoring import schedule_active_calls  # noqa: E402
 from db import tenant_connection  # noqa: E402
 from gemini_live_client import GeminiLiveSession  # noqa: E402
 from health_monitor import HealthMonitor  # noqa: E402
+from metrics import ACTIVE_CALLS  # noqa: E402
 from orchestrator import CallOrchestrator, build_gemini_tools  # noqa: E402
 from session_store import SessionStore  # noqa: E402
 from system_prompt import build_system_prompt  # noqa: E402
@@ -103,7 +106,36 @@ def _build_fallback_session_factory(agency_name: str, greeting: str):
     return factory
 
 
+def _create_gemini_session(**kwargs):
+    session_mode = os.environ.get("GEMINI_SESSION_MODE", "live").lower()
+    if session_mode == "live":
+        return GeminiLiveSession(**kwargs)
+    if session_mode == "fake" and os.environ.get("ENVIRONMENT") == "load":
+        from fake_gemini_session import FakeGeminiLiveSession
+
+        return FakeGeminiLiveSession(**kwargs)
+    raise RuntimeError(
+        "GEMINI_SESSION_MODE must be 'live'; the fake session is only enabled "
+        "when ENVIRONMENT=load"
+    )
+
+
 async def run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
+    if not register_active_call():
+        raise WorkerDraining("Call worker is draining and no longer accepts calls")
+
+    active_calls = ACTIVE_CALLS.labels(tenant_id=tenant_id)
+    active_calls.inc()
+    try:
+        schedule_active_calls(active_call_count())
+        await _run_orchestrator_on_room(room, tenant_id)
+    finally:
+        active_calls.dec()
+        unregister_active_call()
+        schedule_active_calls(active_call_count())
+
+
+async def _run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
     """Builds every per-call dependency, runs a CallOrchestrator against
     `room` until the call ends, then tears everything down.
 
@@ -151,7 +183,7 @@ async def run_orchestrator_on_room(room: rtc.Room, tenant_id: str) -> None:
     fallback_session_factory = _build_fallback_session_factory(agency_name, tenant_settings.greeting)
     health_monitor = HealthMonitor(latency_threshold_ms=FALLBACK_LATENCY_THRESHOLD_MS) if fallback_session_factory else None
 
-    async with GeminiLiveSession(
+    async with _create_gemini_session(
         system_instruction=build_system_prompt(agency_name, greeting=tenant_settings.greeting),
         tools=gemini_tools,
         voice_name=tenant_settings.voice_name,

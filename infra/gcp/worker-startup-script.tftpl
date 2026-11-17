@@ -1,0 +1,70 @@
+#!/bin/bash
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl docker.io python3
+systemctl enable --now docker
+
+python3 - <<'PY'
+import base64
+import json
+import os
+import subprocess
+import urllib.request
+
+project_id = ${jsonencode(project_id)}
+worker_image = ${jsonencode(worker_image)}
+secret_ids = json.loads(base64.b64decode("${base64encode(jsonencode(worker_secret_ids))}"))
+worker_environment = json.loads(base64.b64decode("${base64encode(jsonencode(worker_environment))}"))
+worker_command = json.loads(base64.b64decode("${base64encode(jsonencode(worker_command))}"))
+
+metadata_request = urllib.request.Request(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+    headers={"Metadata-Flavor": "Google"},
+)
+with urllib.request.urlopen(metadata_request, timeout=10) as response:
+    access_token = json.load(response)["access_token"]
+
+registry = worker_image.split("/", 1)[0]
+if registry == "docker.pkg.dev" or registry.endswith("-docker.pkg.dev"):
+    subprocess.run(
+        ["docker", "login", "--username=oauth2accesstoken", "--password-stdin", registry],
+        input=access_token.encode(),
+        check=True,
+    )
+
+environment = os.environ.copy()
+environment.update(worker_environment)
+for env_name, secret_id in secret_ids.items():
+    secret_url = (
+        "https://secretmanager.googleapis.com/v1/projects/"
+        + project_id
+        + "/secrets/"
+        + secret_id
+        + "/versions/latest:access"
+    )
+
+    secret_request = urllib.request.Request(
+        secret_url,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(secret_request, timeout=20) as response:
+        secret_payload = json.load(response)
+    environment[env_name] = base64.b64decode(secret_payload["payload"]["data"]).decode()
+
+command = [
+    "docker",
+    "run",
+    "--detach",
+    "--restart=unless-stopped",
+    "--network=host",
+    "--name=propview-call-worker",
+]
+for env_name in secret_ids:
+    command.extend(["--env", env_name])
+for env_name in worker_environment:
+    command.extend(["--env", env_name])
+command.extend([worker_image, *worker_command])
+subprocess.run(command, check=True, env=environment)
+PY

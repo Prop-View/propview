@@ -12,11 +12,14 @@ import sys
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prometheus_client import REGISTRY
 
 import metrics
+import call_lifecycle
 from metrics import CALLS_STARTED, RESPONSE_LATENCY_SECONDS, TOOL_CALLS, start_metrics_server
 
 
@@ -69,3 +72,37 @@ def test_start_metrics_server_is_idempotent():
     start_metrics_server(port=9099)
     start_metrics_server(port=9099)  # must not raise (e.g. "address already in use")
     assert metrics._metrics_server_started is True
+
+
+def test_worker_health_readiness_and_drain_endpoints(monkeypatch):
+    monkeypatch.setattr(call_lifecycle, "_active_calls", 0)
+    monkeypatch.setattr(call_lifecycle, "_draining", False)
+    monkeypatch.setattr(
+        metrics.WorkerMetricsHandler,
+        "_dependencies_ready",
+        staticmethod(lambda: (True, {"postgres": "connected", "redis": "connected"})),
+    )
+    start_metrics_server(port=9099)
+
+    with urllib.request.urlopen("http://localhost:9099/healthz", timeout=5) as response:
+        assert response.status == 200
+        assert response.read() == b'{"status": "ok"}'
+
+    with urllib.request.urlopen("http://localhost:9099/readyz", timeout=5) as response:
+        assert response.status == 200
+        assert b'"status": "ready"' in response.read()
+
+    assert call_lifecycle.register_active_call()
+    drain_request = urllib.request.Request("http://localhost:9099/drain", method="POST")
+    with urllib.request.urlopen(drain_request, timeout=5) as response:
+        assert response.status == 202
+        assert b'"active_calls": 1' in response.read()
+
+    with pytest.raises(urllib.error.HTTPError) as not_ready:
+        urllib.request.urlopen("http://localhost:9099/readyz", timeout=5)
+    assert not_ready.value.code == 503
+
+    call_lifecycle.unregister_active_call()
+    with urllib.request.urlopen("http://localhost:9099/drained", timeout=5) as response:
+        assert b'"drained": true' in response.read()
+    assert not call_lifecycle.register_active_call()

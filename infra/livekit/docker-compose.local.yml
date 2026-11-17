@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Local-only variant of PROP-102 for macOS dev/testing (no cloud VM).
 # Docker Desktop on Mac doesn't support `network_mode: host`, so ports are
 # published explicitly instead. livekit-server itself is expected to run
@@ -8,7 +6,7 @@ version: "3.9"
 
 services:
   livekit-sip:
-    image: livekit/sip:latest
+    image: livekit/sip:v1.8.0
     restart: unless-stopped
     ports:
       - "5060:5060/udp"

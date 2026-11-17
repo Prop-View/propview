@@ -15,8 +15,9 @@ import os
 import csv
 import io
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +29,7 @@ load_dotenv()  # real gap found 2026-09-09: this was never called here --
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field, ValidationError  # noqa: E402
 from redis.exceptions import RedisError  # noqa: E402
 
@@ -65,6 +67,36 @@ def _row_to_dict(row) -> dict:
         if isinstance(value, Decimal):
             out[key] = float(value)
         elif key == "amenities" and isinstance(value, str):
+            out[key] = json.loads(value)
+    return out
+
+
+def _export_json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError("Sensitive binary values are not included in tenant exports")
+    raise TypeError(f"Unsupported export value: {type(value).__name__}")
+
+
+def _export_row(row) -> dict:
+    out = dict(row)
+    json_fields = {
+        "amenities",
+        "tools_used",
+        "input_params",
+        "output_result",
+        "evidence",
+        "metadata",
+        "events",
+        "payload",
+    }
+    for key, value in out.items():
+        if key in json_fields and isinstance(value, str):
             out[key] = json.loads(value)
     return out
 
@@ -149,6 +181,14 @@ class ListingUpdateRequest(BaseModel):
     listing_agent: str | None = None
     amenities: list[str] | None = None
     project_id: int | None = None
+
+
+class DataRetentionPolicyRequest(BaseModel):
+    retention_days: int = Field(ge=1)
+
+
+class TenantDataDeletionConfirmation(BaseModel):
+    confirm_tenant_id: str = Field(min_length=1, max_length=128)
 
 
 @asynccontextmanager
@@ -1038,6 +1078,314 @@ async def get_call_detail(tenant_id: str, call_id: str):
     }
 
 
+TENANT_EXPORT_QUERIES = {
+    "tenant": """
+        SELECT slug, name, status, plan, created_at
+        FROM public.platform_list_tenants()
+        WHERE slug = $1
+    """,
+    "phone_numbers": """
+        SELECT phone_number, tenant_id, created_at
+        FROM public.platform_list_tenant_phone_numbers()
+        WHERE tenant_id = $1
+    """,
+    "projects": """
+        SELECT id, tenant_id, name, developer, city, state, description, created_at
+        FROM projects WHERE tenant_id = $1 ORDER BY id
+    """,
+    "properties": """
+        SELECT id, tenant_id, project_id, address, city, state, zip_code,
+               property_type, status, beds, baths, sqft, price, hoa_fee,
+               listing_agent, amenities, floor_plan_url, created_at, updated_at
+        FROM properties WHERE tenant_id = $1 ORDER BY id
+    """,
+    "knowledge_base_chunks": """
+        SELECT id, tenant_id, project_id, property_id, source_type,
+               source_name, content, created_at
+        FROM knowledge_base_chunks WHERE tenant_id = $1 ORDER BY id
+    """,
+    "contacts": """
+        SELECT id, tenant_id, full_name, phone_number, email, created_at
+        FROM contacts WHERE tenant_id = $1 ORDER BY id
+    """,
+    "leads": """
+        SELECT id, tenant_id, contact_id, property_id, intent, budget_min,
+               budget_max, timeline, decision_maker, priority, status, notes,
+               created_at, updated_at
+        FROM leads WHERE tenant_id = $1 ORDER BY id
+    """,
+    "appointments": """
+        SELECT id, tenant_id, lead_id, property_id, scheduled_at, status,
+               agent_name, confirmation_sms_sent_at, created_at
+        FROM appointments WHERE tenant_id = $1 ORDER BY id
+    """,
+    "interactions": """
+        SELECT id, tenant_id, contact_id, lead_id, call_id, channel, transcript,
+               duration_seconds, outcome, created_at
+        FROM interactions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "conversation_turns": """
+        SELECT id, tenant_id, call_id, turn_index, speaker, text, interrupted,
+               timestamp_ms, created_at
+        FROM conversation_turns WHERE tenant_id = $1 ORDER BY id
+    """,
+    "tool_invocations": """
+        SELECT id, tenant_id, call_id, turn_index, tool_name, input_params,
+               output_result, error, latency_ms, success, created_at
+        FROM tool_invocations WHERE tenant_id = $1 ORDER BY id
+    """,
+    "call_analytics": """
+        SELECT id, tenant_id, call_id, total_turns, caller_turns, agent_turns,
+               duration_seconds, tools_used, barge_in_count, outcome, lead_id,
+               created_at
+        FROM call_analytics WHERE tenant_id = $1 ORDER BY id
+    """,
+    "follow_ups": """
+        SELECT id, tenant_id, lead_id, appointment_id, kind, sent_at
+        FROM follow_ups WHERE tenant_id = $1 ORDER BY id
+    """,
+    "consent_records": """
+        SELECT id, tenant_id, contact_id, call_id, purpose, granted,
+               capture_method, captured_at, evidence, created_at
+        FROM consent_records WHERE tenant_id = $1 ORDER BY id
+    """,
+    "retention_policy": """
+        SELECT tenant_id, retention_days, updated_at
+        FROM tenant_data_retention WHERE tenant_id = $1
+    """,
+    "tenant_settings": """
+        SELECT tenant_id, calendar_provider, agency_name, broker_transfer_number,
+               sms_sender_number, whatsapp_sender_number, time_zone,
+               business_hours_start_hour, business_hours_end_hour, voice_name,
+               greeting, updated_at
+        FROM tenant_settings WHERE tenant_id = $1
+    """,
+    "account_users": """
+        SELECT id, tenant_id, email, display_name, role, is_active,
+               email_verified_at, created_at, updated_at
+        FROM account_users WHERE tenant_id = $1 ORDER BY id
+    """,
+    "account_sessions": """
+        SELECT id, tenant_id, user_id, expires_at, revoked_at, created_at
+        FROM account_sessions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "account_tokens": """
+        SELECT id, tenant_id, user_id, purpose, expires_at, used_at, created_at
+        FROM account_tokens WHERE tenant_id = $1 ORDER BY id
+    """,
+    "audit_log": """
+        SELECT id, tenant_id, actor_user_id, action, entity_type, entity_id,
+               metadata, created_at
+        FROM audit_log WHERE tenant_id = $1 ORDER BY id
+    """,
+    "tenant_webhooks": """
+        SELECT id, tenant_id, target_url, events, is_enabled, created_at, updated_at
+        FROM tenant_webhooks WHERE tenant_id = $1 ORDER BY id
+    """,
+    "webhook_deliveries": """
+        SELECT id, tenant_id, webhook_id, event_name, payload, status, attempts,
+               next_attempt_at, lease_expires_at, last_status_code, last_error,
+               created_at, delivered_at
+        FROM webhook_deliveries WHERE tenant_id = $1 ORDER BY id
+    """,
+    "email_outbox": """
+        SELECT id, tenant_id, recipient, subject, body, status, attempts,
+               next_attempt_at, lease_expires_at, last_error, created_at, sent_at
+        FROM email_outbox WHERE tenant_id = $1 ORDER BY id
+    """,
+    "usage_events": """
+        SELECT id, tenant_id, event_type, source_id, quantity, metadata, occurred_at
+        FROM usage_events WHERE tenant_id = $1 ORDER BY id
+    """,
+    "billing_subscriptions": """
+        SELECT id, tenant_id, plan_slug, plan_name, provider,
+               provider_subscription_id, status, checkout_url,
+               current_period_start, current_period_end, created_at, updated_at
+        FROM billing_subscriptions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "billing_webhook_events": """
+        SELECT id, tenant_id, provider_event_id, event_name,
+               provider_subscription_id, received_at, processed_at
+        FROM billing_webhook_events WHERE tenant_id = $1 ORDER BY id
+    """,
+}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/privacy/export",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited(DASHBOARD_LIMIT, budget="privacy-export"))],
+)
+async def export_tenant_data(tenant_id: str):
+    async def stream_export():
+        exported_at = datetime.now(timezone.utc).isoformat()
+        yield (
+            '{"tenant_id":'
+            + json.dumps(tenant_id)
+            + ',"exported_at":'
+            + json.dumps(exported_at)
+            + ',"data":{'
+        )
+        async with tenant_connection(tenant_id) as conn:
+            for index, (name, query) in enumerate(TENANT_EXPORT_QUERIES.items()):
+                if index:
+                    yield ","
+                yield json.dumps(name) + ":["
+                first = True
+                async for row in conn.cursor(query, tenant_id, prefetch=500):
+                    if not first:
+                        yield ","
+                    first = False
+                    yield json.dumps(
+                        _export_row(row),
+                        default=_export_json_default,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                yield "]"
+        yield "}}"
+
+    return StreamingResponse(
+        stream_export(),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="tenant-{tenant_id}-export.json"'},
+    )
+
+
+TENANT_DATA_DELETE_TABLES = (
+    "email_outbox",
+    "webhook_deliveries",
+    "tenant_webhooks",
+    "account_tokens",
+    "account_sessions",
+    "account_users",
+    "audit_log",
+    "follow_ups",
+    "appointments",
+    "call_analytics",
+    "tool_invocations",
+    "conversation_turns",
+    "consent_records",
+    "interactions",
+    "leads",
+    "contacts",
+    "tenant_data_retention",
+    "knowledge_base_chunks",
+    "properties",
+    "projects",
+    "usage_events",
+    "billing_webhook_events",
+    "billing_subscriptions",
+    "tenant_settings",
+)
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/privacy/data",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited(DASHBOARD_LIMIT, budget="privacy-delete"))],
+)
+async def delete_tenant_data(
+    tenant_id: str,
+    confirmation: TenantDataDeletionConfirmation,
+):
+    if confirmation.confirm_tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="confirm_tenant_id must exactly match the tenant in the URL",
+        )
+
+    async with tenant_connection(tenant_id) as conn:
+        counts: dict[str, int] = {}
+        for table in TENANT_DATA_DELETE_TABLES:
+            counts[table] = await conn.fetchval(
+                f"""
+                WITH deleted AS (
+                    DELETE FROM {table} WHERE tenant_id = $1 RETURNING 1
+                )
+                SELECT count(*) FROM deleted
+                """,
+                tenant_id,
+            )
+
+        # A tenant whose data has been erased must no longer receive calls.
+        registry_rows = await conn.fetch(
+            "SELECT slug, name, plan FROM public.platform_list_tenants() WHERE slug = $1",
+            tenant_id,
+        )
+        for row in registry_rows:
+            await conn.execute(
+                "SELECT public.platform_upsert_tenant($1, $2, 'suspended', $3)",
+                row["slug"],
+                row["name"],
+                row["plan"],
+            )
+        phone_numbers = await conn.fetch(
+            """
+            SELECT phone_number
+            FROM public.platform_list_tenant_phone_numbers()
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        for row in phone_numbers:
+            await conn.execute(
+                "SELECT public.platform_remove_tenant_phone_number($1)",
+                row["phone_number"],
+            )
+        counts["phone_numbers_unassigned"] = len(phone_numbers)
+
+        await write_audit(
+            conn,
+            tenant_id,
+            "tenant.data_deleted",
+            actor_user_id=None,
+            metadata={"deleted_counts": counts},
+        )
+
+    return {"tenant_id": tenant_id, "deleted_counts": counts, "tenant_suspended": True}
+
+
+@app.put(
+    "/admin/tenants/{tenant_id}/privacy/retention",
+    dependencies=[Depends(require_owner_or_machine)],
+)
+async def set_tenant_retention_policy(
+    tenant_id: str,
+    policy: DataRetentionPolicyRequest,
+):
+    async with tenant_connection(tenant_id) as conn:
+        await conn.execute(
+            """
+            INSERT INTO tenant_data_retention (tenant_id, retention_days, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                retention_days = EXCLUDED.retention_days,
+                updated_at = now()
+            """,
+            tenant_id,
+            policy.retention_days,
+        )
+    return {"tenant_id": tenant_id, "retention_days": policy.retention_days}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/privacy/retention",
+    dependencies=[Depends(require_owner_or_machine)],
+)
+async def get_tenant_retention_policy(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT retention_days, updated_at
+            FROM tenant_data_retention
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    if row is None:
+        return {"tenant_id": tenant_id, "retention_days": None}
+    return {"tenant_id": tenant_id, **_row_to_dict(row)}
+
+
 @app.get(
     "/admin/tenants/{tenant_id}/stats",
     dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
@@ -1125,8 +1473,7 @@ async def get_dashboard_stats(tenant_id: str):
     }
 
 
-@app.get("/health")
-async def health():
+async def _dependency_status() -> dict[str, str]:
     dependencies = {"postgres": "connected", "redis": "connected"}
     try:
         pool = await get_pool()
@@ -1138,5 +1485,25 @@ async def health():
         await get_redis_client().ping()
     except (RedisError, OSError, TimeoutError):
         dependencies["redis"] = "offline"
+    return dependencies
+
+
+@app.get("/health")
+async def health():
+    dependencies = await _dependency_status()
     status = "ok" if all(value == "connected" for value in dependencies.values()) else "degraded"
     return {"status": status, "service": "admin-api", "dependencies": dependencies}
+
+
+@app.get("/ready")
+async def readiness():
+    dependencies = await _dependency_status()
+    ready = all(value == "connected" for value in dependencies.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "service": "admin-api",
+            "dependencies": dependencies,
+        },
+    )
