@@ -30,10 +30,19 @@ curl -X PUT localhost:8001/admin/tenants/default/calendar-credentials \
   -d '{"provider": "google", "credentials": {"refresh_token": "...", "client_id": "...", "client_secret": "..."}}'
 ```
 
-SMS/WhatsApp use plain env vars (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
-`TWILIO_SMS_FROM_NUMBER`, `TWILIO_WHATSAPP_FROM_NUMBER`) — not
-per-tenant encrypted storage like calendar credentials, since this MVP
-runs one Twilio account for all tenants (see `infra/telephony/`).
+Twilio account credentials remain service-level configuration
+(`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`). The SMS and WhatsApp sender
+numbers can be configured per tenant in `tenant_settings`; the
+environment sender numbers are local-development fallbacks. The
+orchestrator, booking tools, and follow-up scan pass the resolved sender
+to `sms_dispatch.py` explicitly. Successfully sent booking, transfer,
+and follow-up SMS messages are recorded in the tenant-scoped
+`usage_events` ledger; failed sends are not counted.
+
+Operational settings are managed through
+`PUT /admin/tenants/{tenant_id}/settings` (see
+`../admin-api/README.md`). Calendar booking uses each tenant's time zone
+and business hours when interpreting and searching appointment slots.
 
 ## Double-booking prevention (Sprint 4 risk register)
 

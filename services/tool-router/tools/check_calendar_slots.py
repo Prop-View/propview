@@ -30,7 +30,8 @@ async def check_calendar_slots(
 ) -> dict:
     client = await get_calendar_client(connection, tenant_id)
 
-    time_min = datetime.fromisoformat(args.earliest) if args.earliest else datetime.now().astimezone()
+    time_min = datetime.fromisoformat(args.earliest) if args.earliest else datetime.now(client.time_zone)
+    time_min = client.normalize_datetime(time_min)
     time_max = time_min + timedelta(days=args.search_days)
 
     slots = await client.find_open_slots(time_min, time_max, duration_minutes=args.duration_minutes)

@@ -38,18 +38,18 @@ def _send_sync(to_number: str, from_number: str, body: str) -> str:
     return message.sid
 
 
-async def send_sms(to_number: str, body: str) -> str:
-    from_number = os.environ.get("TWILIO_SMS_FROM_NUMBER")
-    if not from_number:
+async def send_sms(to_number: str, body: str, from_number: str | None = None) -> str:
+    sender = from_number or os.environ.get("TWILIO_SMS_FROM_NUMBER")
+    if not sender:
         raise SmsDispatchError("TWILIO_SMS_FROM_NUMBER not set")
-    return await asyncio.to_thread(_send_sync, to_number, from_number, body)
+    return await asyncio.to_thread(_send_sync, to_number, sender, body)
 
 
-async def send_whatsapp(to_number: str, body: str) -> str:
-    from_number = os.environ.get("TWILIO_WHATSAPP_FROM_NUMBER")
-    if not from_number:
+async def send_whatsapp(to_number: str, body: str, from_number: str | None = None) -> str:
+    sender = from_number or os.environ.get("TWILIO_WHATSAPP_FROM_NUMBER")
+    if not sender:
         raise SmsDispatchError("TWILIO_WHATSAPP_FROM_NUMBER not set")
-    return await asyncio.to_thread(_send_sync, f"whatsapp:{to_number}", f"whatsapp:{from_number}", body)
+    return await asyncio.to_thread(_send_sync, f"whatsapp:{to_number}", f"whatsapp:{sender}", body)
 
 
 def build_appointment_confirmation(address: str, scheduled_at_local: str, agency_name: str = "Your agent") -> str:

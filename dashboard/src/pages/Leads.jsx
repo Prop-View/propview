@@ -1,4 +1,4 @@
-import { ArrowUpDown, Search, Users } from 'lucide-react'
+import { Search, Users } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../api'
 import Badge from '../components/Badge'
@@ -22,6 +22,9 @@ function formatBudget(min, max) {
 export default function Leads() {
   const [search, setSearch] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('all')
+  const [updates, setUpdates] = useState({})
+  const [savingId, setSavingId] = useState(null)
+  const [saveMessage, setSaveMessage] = useState('')
 
   const params = {}
   if (priorityFilter !== 'all') params.priority = priorityFilter
@@ -36,6 +39,27 @@ export default function Leads() {
       l.full_name?.toLowerCase().includes(search.toLowerCase()) ||
       l.phone_number?.includes(search)
   )
+
+  async function saveLead(lead) {
+    const update = updates[lead.id] || {}
+    if (!Object.keys(update).length) return
+    setSavingId(lead.id)
+    setSaveMessage('')
+    try {
+      await api.updateLead(lead.id, update)
+      setUpdates((current) => {
+        const next = { ...current }
+        delete next[lead.id]
+        return next
+      })
+      setSaveMessage(`Saved changes for ${lead.full_name || 'lead'}.`)
+      refetch()
+    } catch (requestError) {
+      setSaveMessage(`Could not save lead: ${requestError.message}`)
+    } finally {
+      setSavingId(null)
+    }
+  }
 
   return (
     <div className="space-y-5 max-w-[1200px]">
@@ -73,6 +97,8 @@ export default function Leads() {
           ))}
         </div>
       </div>
+
+      {saveMessage && <p role="status" className={`text-[12px] ${saveMessage.startsWith('Could not') ? 'text-hot' : 'text-accent'}`}>{saveMessage}</p>}
 
       {loading ? (
         <Loading />
@@ -126,6 +152,43 @@ export default function Leads() {
                     <Badge variant={lead.status} />
                   </div>
                 </div>
+              </div>
+              <div className="mt-4 pt-3 border-t border-border-light grid sm:grid-cols-[1fr_2fr_auto] gap-3 items-end">
+                <label>
+                  <span className="text-[11px] text-text-muted block mb-1">Status</span>
+                  <select
+                    value={updates[lead.id]?.status ?? lead.status}
+                    onChange={(event) => setUpdates((current) => ({
+                      ...current,
+                      [lead.id]: { ...current[lead.id], status: event.target.value },
+                    }))}
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-bg-card text-[12px]"
+                  >
+                    {['new', 'qualified', 'appointment_set', 'closed_won', 'closed_lost'].map((status) => (
+                      <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span className="text-[11px] text-text-muted block mb-1">Notes</span>
+                  <textarea
+                    value={updates[lead.id]?.notes ?? lead.notes ?? ''}
+                    maxLength={10000}
+                    onChange={(event) => setUpdates((current) => ({
+                      ...current,
+                      [lead.id]: { ...current[lead.id], notes: event.target.value },
+                    }))}
+                    className="w-full min-h-10 px-3 py-2 rounded-lg border border-border bg-bg-card text-[12px]"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={savingId === lead.id}
+                  onClick={() => saveLead(lead)}
+                  className="px-4 py-2 rounded-lg bg-accent text-white text-[12px] font-medium disabled:opacity-50"
+                >
+                  {savingId === lead.id ? 'Saving...' : 'Save lead'}
+                </button>
               </div>
             </div>
           ))}

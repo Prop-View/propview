@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from dotenv import load_dotenv
+import asyncpg
 
 load_dotenv()  # real gap found 2026-09-09: this was never called, so a
 # .env file here was always silently ignored -- every env var (including
@@ -20,7 +21,9 @@ load_dotenv()  # real gap found 2026-09-09: this was never called, so a
 # code (sys.path wiring) still runs at import time regardless.
 
 from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel, ValidationError  # noqa: E402
+from redis.exceptions import RedisError  # noqa: E402
 
 from auth import require_internal_token  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
@@ -110,3 +113,28 @@ async def tools_schema():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness():
+    dependencies = {"postgres": "connected", "redis": "connected"}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as connection:
+            await connection.fetchval("SELECT 1")
+    except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError):
+        dependencies["postgres"] = "offline"
+    try:
+        await get_redis_client().ping()
+    except (RedisError, OSError, TimeoutError):
+        dependencies["redis"] = "offline"
+
+    ready = all(value == "connected" for value in dependencies.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "service": "tool-router",
+            "dependencies": dependencies,
+        },
+    )

@@ -25,6 +25,17 @@ superuser — Postgres always bypasses RLS for superusers, so connecting as
 one would make this isolation silently do nothing (found by testing it,
 not assumed — see `db/migrations/README.md`).
 
+## Tenant operational settings and usage metering
+
+Booking tools read the tenant's time zone, business hours, agency name,
+and SMS/WhatsApp sender numbers from `tenant_settings` while inside the
+same tenant-scoped connection. `BUSINESS_TIME_ZONE`,
+`BUSINESS_HOURS_START_HOUR`, `BUSINESS_HOURS_END_HOUR`, sender numbers,
+and `AGENCY_NAME` in `.env` are local-development fallbacks only.
+Successful booking-confirmation SMS sends create an idempotent
+`usage_events` row; failed sends are not counted. Monthly usage is
+available to the tenant through the Admin API's monthly-usage endpoint.
+
 ## Auth
 
 Closes `infra/observability/SECURITY_AUDIT.md` section 3's "no

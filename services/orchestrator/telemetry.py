@@ -33,7 +33,15 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Span
 
-from metrics import CALL_DURATION_SECONDS, CALLS_ENDED, CALLS_STARTED, ERRORS, INTERRUPTIONS, RESPONSE_LATENCY_SECONDS
+from metrics import (
+    CALL_DURATION_SECONDS,
+    CALL_FAILURES,
+    CALLS_ENDED,
+    CALLS_STARTED,
+    ERRORS,
+    INTERRUPTIONS,
+    RESPONSE_LATENCY_SECONDS,
+)
 
 SERVICE_NAME = "core-orchestrator"
 
@@ -190,6 +198,9 @@ class CallTelemetry:
             level="ERROR",
         )
         ERRORS.labels(tenant_id=self._tenant_id, source=source).inc()
+
+    def record_call_failure(self) -> None:
+        CALL_FAILURES.labels(tenant_id=self._tenant_id).inc()
 
     def end(self) -> None:
         duration_ms = (time.monotonic() - self._call_started_at) * 1000

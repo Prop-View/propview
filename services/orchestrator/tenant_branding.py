@@ -10,25 +10,10 @@ credentials -- same table, same per-tenant-row shape.
 
 from __future__ import annotations
 
-import asyncpg
+from tenant_settings import get_tenant_call_settings
 
 
 async def get_agency_name(database_url: str, tenant_id: str, default: str) -> str:
-    """`default` (main.py's AGENCY_NAME env var) covers both real gaps
-    this can't distinguish between: DATABASE_URL unset entirely (local
-    dev without Postgres, same degrade-gracefully pattern
-    transcript_store.py uses), and a tenant that exists but was
-    onboarded before this existed / never set branding via
-    PUT /admin/tenants/{tenant_id}/branding."""
-    conn = await asyncpg.connect(database_url)
-    try:
-        async with conn.transaction():
-            await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tenant_id)
-            row = await conn.fetchrow(
-                "SELECT agency_name FROM tenant_settings WHERE tenant_id = $1", tenant_id
-            )
-    finally:
-        await conn.close()
-    if row is None or not row["agency_name"]:
-        return default
-    return row["agency_name"]
+    """Compatibility helper for callers that only need the agency name."""
+    settings = await get_tenant_call_settings(tenant_id, database_url, default_agency_name=default)
+    return settings.agency_name or default

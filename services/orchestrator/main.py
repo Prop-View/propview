@@ -23,9 +23,13 @@ import os
 import sys
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from livekit import api, rtc
 
 from call_session import LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, run_orchestrator_on_room
+from db import close_pool
 from metrics import start_metrics_server
 
 logging.basicConfig(level=logging.INFO)
@@ -49,14 +53,16 @@ def make_token(room_name: str) -> str:
 
 
 async def run_call(room_name: str) -> None:
-    room = rtc.Room()
-    await room.connect(LIVEKIT_URL, make_token(room_name))
-    logger.info("Agent joined room %r", room_name)
-    await run_orchestrator_on_room(room, TENANT_ID)
+    try:
+        room = rtc.Room()
+        await room.connect(LIVEKIT_URL, make_token(room_name))
+        logger.info("Agent joined room %r", room_name)
+        await run_orchestrator_on_room(room, TENANT_ID)
+    finally:
+        await close_pool()
 
 
 def main() -> None:
-    load_dotenv()
     if len(sys.argv) != 2:
         sys.exit("Usage: python main.py <room-name>")
     if METRICS_PORT:

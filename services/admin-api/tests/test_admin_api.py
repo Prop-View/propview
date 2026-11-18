@@ -7,6 +7,7 @@ Run: DATABASE_URL=postgresql://propview_app:devpassword@localhost/propview_dev \
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -186,6 +187,142 @@ def test_branding_upsert_overwrites(client):
 def test_branding_missing_returns_null(client):
     resp = client.get(f"/admin/tenants/{TEST_TENANT}/branding")
     assert resp.json() == {"agency_name": None}
+
+
+def test_tenant_operational_settings_roundtrip(client):
+    settings = {
+        "broker_transfer_number": "+15125550111",
+        "sms_sender_number": "+15125550112",
+        "whatsapp_sender_number": "+15125550113",
+        "time_zone": "America/Chicago",
+        "business_hours_start_hour": 8,
+        "business_hours_end_hour": 18,
+        "voice_name": "Kore",
+        "greeting": "Thanks for calling Austin Realty.",
+    }
+    put_resp = client.put(f"/admin/tenants/{TEST_TENANT}/settings", json=settings)
+    assert put_resp.status_code == 200, put_resp.text
+
+    get_resp = client.get(f"/admin/tenants/{TEST_TENANT}/settings")
+    assert get_resp.status_code == 200
+    assert get_resp.json() == settings
+
+
+def test_tenant_operational_settings_validate_timezone_and_hours(client):
+    bad_timezone = client.put(
+        f"/admin/tenants/{TEST_TENANT}/settings",
+        json={"time_zone": "Not/A_Timezone"},
+    )
+    assert bad_timezone.status_code == 422
+
+    bad_hours = client.put(
+        f"/admin/tenants/{TEST_TENANT}/settings",
+        json={"business_hours_start_hour": 19, "business_hours_end_hour": 8},
+    )
+    assert bad_hours.status_code == 422
+
+
+def test_platform_operator_manages_registry_and_phone_number_mapping(client):
+    headers = {"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"}
+    tenant = {
+        "slug": "registry-test",
+        "name": "Registry Test Realty",
+        "status": "active",
+        "plan": "starter",
+    }
+    create_resp = client.post("/admin/platform/tenants", json=tenant, headers=headers)
+    assert create_resp.status_code == 200, create_resp.text
+
+    mapping = {"tenant_id": tenant["slug"], "phone_number": "+15125550198"}
+    map_resp = client.put("/admin/platform/phone-numbers", json=mapping, headers=headers)
+    assert map_resp.status_code == 200, map_resp.text
+    assert mapping in [
+        {"tenant_id": item["tenant_id"], "phone_number": item["phone_number"]}
+        for item in client.get("/admin/platform/phone-numbers", headers=headers).json()["items"]
+    ]
+
+    async def resolve_number():
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        try:
+            active_tenant_ids = await conn.fetch(
+                "SELECT public.platform_list_active_tenants() AS tenant_id"
+            )
+            return await conn.fetchval(
+                "SELECT public.platform_resolve_tenant_by_phone($1)",
+                mapping["phone_number"],
+            ), [row["tenant_id"] for row in active_tenant_ids]
+        finally:
+            await conn.close()
+
+    resolved_tenant, active_tenant_ids = asyncio.run(resolve_number())
+    assert resolved_tenant == tenant["slug"]
+    assert tenant["slug"] in active_tenant_ids
+
+    suspended = {**tenant, "status": "suspended"}
+    assert client.post("/admin/platform/tenants", json=suspended, headers=headers).status_code == 200
+    resolved_tenant, active_tenant_ids = asyncio.run(resolve_number())
+    assert resolved_tenant is None
+    assert tenant["slug"] not in active_tenant_ids
+
+    remove_resp = client.request(
+        "DELETE",
+        "/admin/platform/phone-numbers",
+        json={"phone_number": mapping["phone_number"]},
+        headers=headers,
+    )
+    assert remove_resp.status_code == 200, remove_resp.text
+
+
+def test_platform_registry_tables_are_not_directly_readable(client):
+    async def read_registry_tables():
+        for table_name, column_name in (("tenants", "slug"), ("tenant_phone_numbers", "phone_number")):
+            conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+            try:
+                with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                    await conn.fetch(f"SELECT {column_name} FROM {table_name}")
+            finally:
+                await conn.close()
+
+    asyncio.run(read_registry_tables())
+
+
+def test_monthly_usage_is_tenant_scoped(client):
+    call_id = f"usage-test-{uuid.uuid4().hex}"
+
+    async def record_usage():
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        try:
+            async with conn.transaction():
+                await conn.execute("SELECT set_config('app.tenant_id', $1, true)", TEST_TENANT)
+                await conn.execute(
+                    """
+                    INSERT INTO usage_events (tenant_id, event_type, source_id)
+                    VALUES ($1, 'call', $2)
+                    """,
+                    TEST_TENANT,
+                    call_id,
+                )
+        finally:
+            await conn.close()
+
+    asyncio.run(record_usage())
+    own_rows = client.get(f"/admin/tenants/{TEST_TENANT}/usage/monthly")
+    assert own_rows.status_code == 200
+    assert any(item["event_type"] == "call" and item["event_count"] >= 1 for item in own_rows.json()["items"])
+
+    other_tenant = "usage-other-tenant"
+    provisioned = client.post(
+        f"/admin/tenants/{other_tenant}/provision",
+        headers={"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"},
+    )
+    assert provisioned.status_code == 200
+    other_key = provisioned.json()["admin_api_key"]
+    other_rows = client.get(
+        f"/admin/tenants/{other_tenant}/usage/monthly",
+        headers={"Authorization": f"Bearer {other_key}"},
+    )
+    assert other_rows.status_code == 200
+    assert other_rows.json()["items"] == []
 
 
 # Auth (closes infra/observability/SECURITY_AUDIT.md section 3): per-tenant

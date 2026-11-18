@@ -43,6 +43,7 @@ async def _cleanup() -> None:
     try:
         await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
         await conn.execute("DELETE FROM follow_ups WHERE tenant_id = $1", TEST_TENANT)
+        await conn.execute("DELETE FROM usage_events WHERE tenant_id = $1", TEST_TENANT)
         await conn.execute("DELETE FROM appointments WHERE tenant_id = $1", TEST_TENANT)
         await conn.execute("DELETE FROM interactions WHERE tenant_id = $1", TEST_TENANT)
         await conn.execute("DELETE FROM leads WHERE tenant_id = $1", TEST_TENANT)
@@ -131,6 +132,15 @@ async def test_no_show_scan_flips_status_and_sends_once():
         "SELECT kind FROM follow_ups WHERE lead_id = $1 AND kind = 'no_show'", row["lead_id"]
     )
     assert logged == "no_show"
+    appointment_id = await row["conn"].fetchval(
+        "SELECT id FROM appointments WHERE lead_id = $1", row["lead_id"]
+    )
+    usage_count = await row["conn"].fetchval(
+        "SELECT count(*) FROM usage_events WHERE tenant_id = $1 AND event_type = 'sms' AND source_id = $2",
+        TEST_TENANT,
+        f"follow-up:no-show:{appointment_id}",
+    )
+    assert usage_count == 1
     await row["conn"].close()
 
 
@@ -177,11 +187,21 @@ async def test_no_show_scan_retries_a_previously_failed_send():
         "SELECT count(*) FROM follow_ups WHERE lead_id = $1 AND kind = 'no_show'", row["lead_id"]
     )
     assert logged == 0
+    usage_count = await row["conn"].fetchval(
+        "SELECT count(*) FROM usage_events WHERE tenant_id = $1 AND event_type = 'sms'",
+        TEST_TENANT,
+    )
+    assert usage_count == 0
 
     with patch("followup_scan.send_sms", _mock_send_sms()) as mock_send:
         second_sent = await _scan_no_shows(TEST_TENANT, AGENCY)
     assert second_sent == 1  # retried successfully this time
     mock_send.assert_called_once()
+    usage_count = await row["conn"].fetchval(
+        "SELECT count(*) FROM usage_events WHERE tenant_id = $1 AND event_type = 'sms'",
+        TEST_TENANT,
+    )
+    assert usage_count == 1
     await row["conn"].close()
 
 
@@ -227,6 +247,12 @@ async def test_nurture_scan_sends_for_stale_lead_without_appointment():
         "SELECT kind FROM follow_ups WHERE lead_id = $1 AND kind = 'nurture'", row["lead_id"]
     )
     assert logged == "nurture"
+    usage_count = await row["conn"].fetchval(
+        "SELECT count(*) FROM usage_events WHERE tenant_id = $1 AND event_type = 'sms' AND source_id = $2",
+        TEST_TENANT,
+        f"follow-up:nurture:{row['lead_id']}",
+    )
+    assert usage_count == 1
     await row["conn"].close()
 
 

@@ -18,11 +18,13 @@ from pydantic import BaseModel
 from redis_client import get_redis_client
 from tools._calendar_context import get_calendar_client
 from tools._lead_context import ensure_contact_and_lead
+from tools._tenant_settings import get_tenant_operational_settings
 
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "scheduling"))  # append, not insert(0) -- see _calendar_context.py
 from calendar_client import TimeSlot  # noqa: E402
 from redis_lock import SlotLock, slot_lock_key  # noqa: E402
 from sms_dispatch import SmsDispatchError, build_appointment_confirmation, send_sms  # noqa: E402
+from usage_metering import record_usage_event  # noqa: E402
 
 
 class BookSiteVisitArgs(BaseModel):
@@ -49,7 +51,11 @@ async def book_site_visit(
     _, lead_id = await ensure_contact_and_lead(connection, tenant_id, caller_phone_number, lead_id)
 
     client = await get_calendar_client(connection, tenant_id)
-    slot = TimeSlot(datetime.fromisoformat(args.slot_start), datetime.fromisoformat(args.slot_end))
+    settings = await get_tenant_operational_settings(connection, tenant_id)
+    slot = TimeSlot(
+        client.normalize_datetime(datetime.fromisoformat(args.slot_start)),
+        client.normalize_datetime(datetime.fromisoformat(args.slot_end)),
+    )
     duration_minutes = int((slot.end - slot.start).total_seconds() // 60)
 
     lock_key = slot_lock_key(tenant_id, "primary", slot.start.isoformat())
@@ -95,8 +101,19 @@ async def book_site_visit(
         # booking test suite on Windows, not assumed.
         hour_12 = slot.start.strftime("%I:%M %p").lstrip("0")
         formatted_time = f"{slot.start.strftime('%A, %B')} {slot.start.day} at {hour_12}"
-        body = build_appointment_confirmation(address, formatted_time)
-        await send_sms(caller_phone_number, body)
+        body = build_appointment_confirmation(address, formatted_time, agency_name=settings.agency_name)
+        message_sid = await send_sms(
+            caller_phone_number,
+            body,
+            from_number=settings.sms_sender_number,
+        )
+        await record_usage_event(
+            connection,
+            tenant_id,
+            "sms",
+            message_sid,
+            metadata={"purpose": "appointment_confirmation", "appointment_id": appointment_id},
+        )
         confirmation_sent = True
         await connection.execute("UPDATE appointments SET confirmation_sms_sent_at = now() WHERE id = $1", appointment_id)
     except SmsDispatchError:

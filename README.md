@@ -110,10 +110,16 @@ either source.
   [orchestrator README](services/orchestrator/README.md) for what is
   implemented and tested.
 
-**Still not a complete self-serve or billable product**: tenant signup,
-user/password accounts, editable dashboard workflows, billing, and
-production GCP deployment are not implemented yet. These are separate
-approved phases, not implied by the original Sprint Plan ticket count.
+**Billing test-mode foundation added, not a production billing launch**:
+the Admin API and existing React dashboard now support verified account
+sessions, product edits/uploads, operational settings, calendar connect,
+webhooks, team access, monthly usage, subscription state, and advisory
+quota warnings. Razorpay checkout is restricted to test credentials and
+requires operator-configured catalog prices and provider test plans.
+Payment handling has not been live-verified; no production prices or
+credentials are configured. Production GCP deployment remains a later
+phase; real SMTP, Google OAuth, Gemini document embedding, and telephony
+setup still need human credentials and live verification.
 
 **The 1 remaining ticket**: PROP-49 (plan `PROP-608`, soft launch pilot
 deployment) — needs an actual real estate agency partner and live inbound

@@ -1,0 +1,38 @@
+groups:
+  - name: propview-production
+    rules:
+      - alert: PropviewCallFailures
+        expr: sum(rate(propview_call_failures_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Propview call forwarding failures are occurring
+          description: One or more orchestrator calls failed while forwarding audio.
+
+      - alert: PropviewOrchestratorErrors
+        expr: sum(rate(propview_errors_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Propview orchestrator error rate is elevated
+          description: The orchestrator is reporting more than 0.1 errors per second.
+
+      - alert: PropviewResponseLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(propview_response_latency_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Propview response latency p95 is above two seconds
+          description: The TTFA approximation has exceeded the latency alert threshold.
+
+      - alert: PropviewFallbackSwitches
+        expr: sum(rate(propview_fallback_switches_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Propview is switching calls to the fallback provider
+          description: At least one fallback switch occurred in the last five minutes.

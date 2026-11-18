@@ -265,14 +265,22 @@ prototyping. Something has to explicitly request this agent for a room —
 for real inbound SIP calls, that's `../../infra/livekit/dispatch-rule.json`'s
 `roomConfig.agents` entry, which must name the exact same agent name.
 
-**Per-tenant resolution, not a fixed env var**: a dispatch job carries a
-freeform metadata string (`ctx.job.metadata`, set by whichever dispatch
-rule routed the call here), read as JSON and expected to carry
-`{"tenant_id": "..."}`. A real multi-tenant deployment needs one dispatch
-rule per tenant, each carrying that tenant's own id — see
-`../../infra/livekit/README.md`. Falls back to `TENANT_ID`'s default
-(`"default"`) if metadata is missing or isn't valid JSON, rather than
-crashing the job.
+**Per-tenant resolution uses the inbound dialed number**: after connecting
+to the room, the worker reads the SIP caller's `sip.trunkPhoneNumber`
+attribute and resolves that E.164 number through the restricted platform
+registry function. `worker.py` fails closed and ends the call if
+`DATABASE_URL`, the dialed number, or an active mapping is unavailable;
+it never falls back to `"default"`. `TENANT_ID` remains only for the
+manual local `main.py` entrypoint. A single shared LiveKit dispatch rule
+can serve multiple tenants; each DID is mapped through the Admin API's
+platform phone-number endpoint (see `../../docs/AGENCY_ONBOARDING.md`).
+
+At call start, `call_session.py` loads the tenant's voice, greeting,
+agency name, broker transfer number, and SMS sender from
+`tenant_settings`. Usage for the completed call and successfully sent
+pre-transfer SMS is added to the tenant-scoped `usage_events` ledger.
+Unset tenant settings can use the service `.env` values for local
+development.
 
 **API verified directly against the installed package, not assumed**:
 the current shape is `AgentServer` + `@server.rtc_session(agent_name=...)`
@@ -337,14 +345,13 @@ result.
 
 Auto-dispatch (`worker.py`) has no pytest suite — proving "does a job
 really get pushed to a running worker automatically" needs a live LiveKit
-server + a live worker process + a real dispatch request, not something
-a unit test fixture can fake meaningfully. Verified instead with a
-one-off script: start `livekit-server --dev`, start `worker.py dev`, have
-a synthetic caller join a room and call
-`lk.agent_dispatch.create_dispatch(CreateAgentDispatchRequest(agent_name="propview-agent", room=..., metadata=...))`,
-and confirm a participant auto-joins within 15s with the correct
-tenant_id showing up in the dispatched job's logs. See the Auto-dispatch
-section above for the full result.
+server + a live worker process + a real dispatch request. The earlier
+explicit-dispatch smoke test verified worker dispatch mechanics, but
+used job metadata for tenant selection and does **not** verify the
+Phase 2 dialed-number registry lookup. That lookup and fail-closed
+behavior remain unverified against a live SIP participant; the local
+environment also lacks the declared `livekit-agents` package for a
+worker runtime test.
 
 ## Definition of Done (from Sprint Plan)
 

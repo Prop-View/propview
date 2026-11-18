@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm run lint
+        working-directory: dashboard
+      - run: uvx ruff check services tests db
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg16
+        env:
+          POSTGRES_DB: propview_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d propview_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/propview_test
+      REDIS_URL: redis://localhost:6379/0
+      ENCRYPTION_KEY: FG6ZzLBZnosF1kPSMHKpkDwpdPrinkzVBQ5I9CdMHEE=
+      INTERNAL_SERVICE_TOKEN: ci-test-token
+      PLATFORM_OPERATOR_TOKEN: ci-platform-token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.13.13
+      - name: Install pinned backend dependencies
+        run: |
+          python -m pip install --require-hashes -r services/orchestrator/requirements.lock
+          python -m pip install --require-hashes -r services/admin-api/requirements.lock
+          python -m pip install --require-hashes -r services/tool-router/requirements.lock
+      - name: Apply database migrations
+        run: python db/migrations/apply_migrations.py
+      - name: Run orchestrator tests
+        working-directory: services/orchestrator
+        run: |
+          python -m pytest tests -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/scheduling:${{ github.workspace }}/services/orchestrator
+      - name: Run Admin API tests
+        working-directory: services/admin-api
+        run: python -m pytest tests -q
+      - name: Run Tool Router tests
+        working-directory: services/tool-router
+        run: python -m pytest tests -q
+      - name: Run scheduling tests
+        working-directory: services/scheduling
+        run: python -m pytest tests -q
+      - name: Run compliance tests
+        working-directory: services/compliance
+        run: python -m pytest tests -q
+      - name: Run lead-engine tests
+        working-directory: services/lead-engine
+        run: python -m pytest tests -q
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm test -- --run
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application and job images
+        run: |
+          docker build -f services/orchestrator/Dockerfile -t propview-worker:ci .
+          docker build -f services/admin-api/Dockerfile -t propview-admin-api:ci .
+          docker build -f services/tool-router/Dockerfile -t propview-tool-router:ci .
+          docker build -f services/follow-up-manager/Dockerfile -t propview-follow-up:ci .
+          docker build -f services/data-retention/Dockerfile -t propview-retention:ci .
+          docker build -f db/migrations/Dockerfile -t propview-migrations:ci .
+          docker build -f dashboard/Dockerfile -t propview-dashboard:ci .
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.13.13
+      - run: python -m pip install pip-audit==2.9.0
+      - name: Audit every Python lockfile
+        shell: bash
+        run: |
+          while IFS= read -r lockfile; do
+            echo "Auditing $lockfile"
+            pip-audit --require-hashes -r "$lockfile"
+          done < <(find services db tests -name requirements.lock -type f | sort)
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform -chdir=infra/gcp init -backend=false -input=false
+      - run: terraform -chdir=infra/gcp validate

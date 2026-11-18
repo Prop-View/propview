@@ -1,6 +1,6 @@
-import { Bath, BedDouble, Building2, Maximize2, Search } from 'lucide-react'
+import { Bath, BedDouble, Building2, Maximize2, Search, Upload } from 'lucide-react'
 import { useState } from 'react'
-import { api } from '../api'
+import { api, getAuth } from '../api'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import ErrorState from '../components/ErrorState'
@@ -14,8 +14,13 @@ function formatPrice(n) {
 }
 
 export default function Properties() {
+  const canManage = getAuth().user?.role === 'owner'
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState('')
+  const [editValues, setEditValues] = useState({})
+  const [busyId, setBusyId] = useState(null)
 
   const params = {}
   if (typeFilter !== 'all') params.property_type = typeFilter
@@ -31,6 +36,59 @@ export default function Properties() {
       p.city?.toLowerCase().includes(search.toLowerCase())
   )
 
+  async function uploadCsv(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    setUploadMessage('')
+    try {
+      const result = await api.uploadListings(file)
+      setUploadMessage(`Imported ${result.inserted} listings.`)
+      refetch()
+    } catch (requestError) {
+      setUploadMessage(`Upload failed: ${requestError.message}`)
+    } finally {
+      setUploading(false)
+      event.target.value = ''
+    }
+  }
+
+  async function saveProperty(property) {
+    const changes = editValues[property.id] || {}
+    if (!Object.keys(changes).length) return
+    setBusyId(property.id)
+    setUploadMessage('')
+    try {
+      await api.updateProperty(property.id, changes)
+      setEditValues((current) => {
+        const next = { ...current }
+        delete next[property.id]
+        return next
+      })
+      setUploadMessage('Listing updated.')
+      refetch()
+    } catch (requestError) {
+      setUploadMessage(`Update failed: ${requestError.message}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function deleteProperty(property) {
+    if (!window.confirm(`Delete the listing at ${property.address}? This cannot be undone.`)) return
+    setBusyId(property.id)
+    setUploadMessage('')
+    try {
+      await api.deleteProperty(property.id)
+      setUploadMessage('Listing deleted.')
+      refetch()
+    } catch (requestError) {
+      setUploadMessage(`Delete failed: ${requestError.message}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <div className="space-y-5 max-w-[1200px]">
       <div>
@@ -39,6 +97,17 @@ export default function Properties() {
           {data ? `${data.total} listings managed by this agency` : 'Loading properties...'}
         </p>
       </div>
+
+      {canManage && <div className="flex flex-wrap items-center gap-3">
+        <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-[12px] font-medium cursor-pointer">
+          <Upload size={14} />
+          {uploading ? 'Uploading...' : 'Upload listings CSV'}
+          <input type="file" accept=".csv,text/csv" className="sr-only" disabled={uploading} onChange={uploadCsv} />
+        </label>
+        <a href="/listings-template.csv" download className="text-[12px] text-accent hover:underline">Download CSV template</a>
+        {uploadMessage && <span role="status" className={`text-[12px] ${uploadMessage.includes('failed') ? 'text-hot' : 'text-text-secondary'}`}>{uploadMessage}</span>}
+      </div>}
+      {!canManage && uploadMessage && <p role="status" className="text-[12px] text-text-secondary">{uploadMessage}</p>}
 
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
         <div className="relative flex-1 max-w-sm">
@@ -126,6 +195,43 @@ export default function Properties() {
                     Agent: {prop.listing_agent}
                   </div>
                 )}
+                {canManage && <details className="mt-4 border-t border-border-light pt-3">
+                  <summary className="text-[12px] text-accent cursor-pointer">Edit listing</summary>
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <label className="text-[11px] text-text-muted">
+                      Price
+                      <input
+                        type="number"
+                        min="0"
+                        value={editValues[prop.id]?.price ?? prop.price}
+                        onChange={(event) => setEditValues((current) => ({
+                          ...current,
+                          [prop.id]: { ...current[prop.id], price: Number(event.target.value) },
+                        }))}
+                        className="w-full mt-1 px-2 py-1.5 rounded border border-border text-[12px] text-text"
+                      />
+                    </label>
+                    <label className="text-[11px] text-text-muted">
+                      Status
+                      <select
+                        value={editValues[prop.id]?.status ?? prop.status}
+                        onChange={(event) => setEditValues((current) => ({
+                          ...current,
+                          [prop.id]: { ...current[prop.id], status: event.target.value },
+                        }))}
+                        className="w-full mt-1 px-2 py-1.5 rounded border border-border bg-bg-card text-[12px] text-text"
+                      >
+                        {['active', 'pending', 'sold', 'off_market'].map((status) => <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="flex justify-between mt-3">
+                    <button type="button" disabled={busyId === prop.id} onClick={() => deleteProperty(prop)} className="text-[12px] text-hot">Delete</button>
+                    <button type="button" disabled={busyId === prop.id} onClick={() => saveProperty(prop)} className="px-3 py-1.5 rounded bg-accent text-white text-[11px] disabled:opacity-50">
+                      {busyId === prop.id ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </details>}
               </div>
             </div>
           ))}

@@ -1,19 +1,20 @@
-# PROP-603: Prometheus scrape config for the orchestrator's /metrics
-# endpoint (services/orchestrator/metrics.py).
-#
-# Honest scope note: this scrapes a single static target, which matches
-# today's reality (one orchestrator process per call, run manually with
-# an explicit room name -- see services/orchestrator/main.py's docstring).
-# Once a persistent multi-call worker process exists (LiveKit Agent
-# Worker dispatch), this target list becomes a real service-discovery
-# config (Kubernetes SD, or a DNS SRV record) instead of a fixed
-# localhost:9090.
+# Scrape the persistent worker by Docker DNS when running the root
+# docker-compose.yml. The static host target remains for the standalone
+# observability stack and manually launched orchestrator.
 
 global:
   scrape_interval: 15s
 
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: propview-orchestrator
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9090
+        refresh_interval: 15s
     static_configs:
       - targets: ["host.docker.internal:9090"]
         labels:

@@ -42,9 +42,9 @@ closest embedding.
   `search_properties` (PROP-304) will use.
 - **`knowledge_base_chunks`** — pgvector-backed RAG source (brochures,
   FAQs, policies, transcripts). `embedding` is `vector(768)`, matching
-  Gemini's `text-embedding-004` — **must match whatever model PROP-302's
-  ingestion script (not yet built) actually uses**, or inserts will fail
-  loudly (pgvector enforces the column's fixed dimension).
+  Gemini's `text-embedding-004`; the Admin API now wraps the shared
+  ingestion helpers for document uploads. A live Gemini embedding
+  request through that endpoint remains unverified.
 - **`contacts` / `leads` / `appointments` / `interactions`** (PROP-401) —
   the CRM tables. `leads`' BANT fields (intent, budget, timeline,
   decision_maker) follow `services/prompts/bant_conversation_design.md`
@@ -63,6 +63,34 @@ closest embedding.
   outcomes the orchestrator can resolve (`booked`, `qualified`,
   `transferred`, `unknown`); any legacy `dropped`/`nurture` values are
   normalized to `unknown`.
+- **Phase 2 tenant operations** (`011_tenant_registry_settings_usage.sql`)
+  adds platform-level `tenants` and `tenant_phone_numbers` registries,
+  tenant operational settings, and the RLS-protected `usage_events`
+  ledger with the `monthly_usage` view. Registry tables intentionally do
+  not use tenant RLS; `propview_app` has no direct table grants and can
+  access them only through narrowly scoped `SECURITY DEFINER` functions
+  owned by `propview_registry_owner`, which has no tenant-data privileges.
+  `usage_events`, like other tenant-owned data, has `tenant_id`, forced
+  RLS, and must be accessed through `tenant_connection()`.
+- **Phase 3 account and product API** (`012_accounts_product_api.sql`)
+  adds RLS-protected account users/sessions/tokens, tenant audit records,
+  webhook configuration and delivery log, and email outbox tables.
+  Registry signup/activation uses restricted `SECURITY DEFINER`
+  functions; application code receives no direct registry-table access.
+  Database triggers enqueue the supported webhook events and hot-lead /
+  appointment emails.
+- **Email trigger correction** (`013_product_email_trigger_fix.sql`)
+  keeps table-specific `NEW` record fields inside their matching trigger
+  branches. The original shared trigger referenced `NEW.priority` while
+  processing appointment rows, causing real inserts to fail; this
+  append-only migration replaces the function without rewriting the
+  already-applied `012` migration.
+- **Phase 5 billing** (`014_billing.sql`) adds the platform-managed
+  `billing_plans` catalog (read-only to `propview_app`) and tenant-RLS
+  `billing_subscriptions` and `billing_webhook_events` tables. Plan prices,
+  quotas, and Razorpay test plan IDs are intentionally not invented or
+  seeded; the platform operator configures them in the catalog before
+  checkout can be offered.
 
 - **Row-Level Security** (PROP-601, `004_row_level_security.sql`) enforces
   `tenant_id` isolation on every table above, fail-closed (a connection
@@ -81,6 +109,14 @@ closest embedding.
   `SELECT set_config('app.tenant_id', $1, true)` (transaction-local)
   before querying — see `services/tool-router/db.py`'s
   `tenant_connection()` for the pattern.
+
+Migrations are append-only (the current sequence follows `014`); do not
+edit an already-applied migration. On a database where a migration has
+already been marked applied, do not rerun it manually. As with other new
+`BIGSERIAL` tables, the app-role sequence grant is explicitly included in
+`011`; a long-lived local database may still need the one-time
+`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO propview_app;`
+repair documented above if it predates the default-privilege fix.
 
 ## Definition of Done (from Sprint Plan)
 

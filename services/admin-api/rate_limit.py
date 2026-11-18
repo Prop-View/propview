@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import time
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from redis.asyncio import Redis
 
 from redis_client import get_redis_client
@@ -36,6 +36,7 @@ DEFAULT_LIMIT = int(os.environ.get("RATE_LIMIT_ADMIN_REQUESTS_PER_WINDOW", "30")
 PROVISION_LIMIT = int(os.environ.get("RATE_LIMIT_PROVISION_REQUESTS_PER_WINDOW", "5"))
 DASHBOARD_LIMIT = int(os.environ.get("RATE_LIMIT_DASHBOARD_REQUESTS_PER_WINDOW", "300"))
 DEFAULT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
+AUTH_LIMIT = int(os.environ.get("RATE_LIMIT_AUTH_REQUESTS_PER_WINDOW", "30"))
 
 
 async def _enforce(
@@ -68,6 +69,45 @@ def rate_limited(
         await _enforce(
             get_redis_client(),
             key=tenant_id,
+            limit=limit,
+            window_seconds=window_seconds,
+            budget=budget,
+        )
+
+    return dependency
+
+
+def platform_rate_limited(
+    limit: int = DEFAULT_LIMIT,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    budget: str = "platform",
+):
+    """Build a rate-limit dependency for platform-operator registry routes."""
+
+    async def dependency() -> None:
+        await _enforce(
+            get_redis_client(),
+            key="platform-operator",
+            limit=limit,
+            window_seconds=window_seconds,
+            budget=budget,
+        )
+
+    return dependency
+
+
+def request_rate_limited(
+    limit: int = AUTH_LIMIT,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    budget: str = "auth",
+):
+    """Build an IP-scoped limiter for routes without a tenant path yet."""
+
+    async def dependency(request: Request) -> None:
+        client_host = request.client.host if request.client else "unknown"
+        await _enforce(
+            get_redis_client(),
+            key=client_host,
             limit=limit,
             window_seconds=window_seconds,
             budget=budget,
