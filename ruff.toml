@@ -1,0 +1,40 @@
+# Ruff is pinned to an exact version in .github/workflows/ci.yml. This file pins
+# the *rule set* for the same reason: with neither pinned, a new ruff release can
+# turn CI red without a single line of code changing (which is how CI first broke
+# on 2026-11-20 -- `uvx ruff check` resolves to the newest release at run time).
+#
+# The selection below is deliberately narrow: rules that catch real defects, not
+# rules that enforce a house style nobody has agreed to yet. Broadening it is a
+# separate decision from getting CI green -- widen `select` when the team wants
+# to, and run `ruff check --fix` in its own commit so the churn stays reviewable.
+
+line-length = 100
+
+# CLAUDE.md section 6: every project .py file is kept parseable on 3.10 even
+# though dependencies pin 3.13, so ruff should not suggest 3.11+ only syntax.
+target-version = "py310"
+
+[lint]
+select = [
+    "E4",  # import placement/shadowing errors
+    "E7",  # statement-level errors (comparisons, lambdas, bare except ordering)
+    "E9",  # syntax/IO errors ruff cannot recover from
+    "F",   # pyflakes: undefined names, unused imports, broken f-strings
+    "B",   # bugbear: mutable defaults, loop-variable capture, silent bugs
+]
+
+ignore = [
+    # FastAPI's dependency injection is expressed as `arg = Depends(...)` in the
+    # signature default, which B008 flags as a function call in a default
+    # argument. It is the framework's intended idiom, not a bug -- this fires on
+    # essentially every endpoint in services/admin-api and services/tool-router.
+    "B008",
+
+    # Services import each other by `sys.path.insert(...)` followed by a plain
+    # import, because they are sibling directories rather than installed
+    # packages (see services/orchestrator/call_session.py and CLAUDE.md
+    # section 12). Imports therefore cannot sit at the top of the file: the path
+    # has to be set up first. Enforcing E402 would mean a `# noqa` on every such
+    # import across the repo, which says nothing a reader did not already know.
+    "E402",
+]

@@ -41,7 +41,6 @@ from auth import (  # noqa: E402
     generate_api_key,
     hash_key,
     require_machine_api_key,
-    require_owner,
     require_owner_or_machine,
     require_platform_token,
     require_tenant_auth,

@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gemini-c
 from livekit import api, rtc
 
 from gemini_live_client import AudioChunk, TurnComplete
-from orchestrator import GEMINI_INPUT_RATE_HZ, GEMINI_OUTPUT_RATE_HZ, CallOrchestrator
+from orchestrator import GEMINI_OUTPUT_RATE_HZ, CallOrchestrator
 from session_store import SessionStore
 
 LIVEKIT_URL = "ws://localhost:7880"

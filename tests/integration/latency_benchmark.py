@@ -100,7 +100,9 @@ async def benchmark_full_turn_latency() -> list[float]:
                 tool_call_seen = False
                 first_audio_after_tool_ms: float | None = None
 
-                async def drive() -> None:
+                # `started` bound by value for this iteration -- see the same
+                # pattern in tests/e2e-voice/harness.py.
+                async def drive(started: float = started) -> None:
                     nonlocal tool_call_seen, first_audio_after_tool_ms
                     async for event in session.receive_events():
                         if isinstance(event, ToolCallRequest):

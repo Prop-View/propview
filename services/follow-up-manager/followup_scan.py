@@ -45,9 +45,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tool-router"))
+# Order matters: `tenant_registry` and `tenant_settings` (orchestrator) do their
+# own `from db import ...`, and sys.path is global, so whichever `db` module wins
+# here wins for them too. tool-router's `db.get_pool()`/`tenant_connection()` take
+# one fewer argument than orchestrator's, so putting tool-router first resolves
+# `db` to the wrong module and every call in this script raises TypeError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "orchestrator"))
 sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))
-sys.path.append(str(Path(__file__).resolve().parent.parent / "orchestrator"))
 
 load_dotenv()
 

@@ -1,8 +1,20 @@
 name: CI
 
+# `push:` with no branch filter made every job run twice on any branch with an
+# open PR -- once for the push, once for the pull_request event -- which is why
+# 4 failing jobs showed up as 8 failing checks. Restricting push to long-lived
+# branches keeps one run per change: feature branches are covered by the
+# pull_request trigger instead.
 on:
   push:
+    branches: [main, dev, 'test/**']
   pull_request:
+
+# Superseded runs are wasted minutes: pushing twice in a minute otherwise leaves
+# the first, now-irrelevant run competing for runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,7 +34,10 @@ jobs:
         working-directory: dashboard
       - run: npm run lint
         working-directory: dashboard
-      - run: uvx ruff check services tests db
+      # Pinned deliberately: bare `uvx ruff` resolves to the newest release at
+      # run time, so a ruff release can fail CI with no code change. The rule
+      # set is pinned alongside it in //ruff.toml.
+      - run: uvx ruff@0.17.6 check services tests db
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -46,7 +61,13 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/propview_test
+      # Tests connect as propview_app, never as a superuser. Postgres bypasses
+      # RLS unconditionally for superusers even under FORCE ROW LEVEL SECURITY,
+      # so running the suite as `postgres` makes every tenant-isolation test
+      # pass vacuously -- it proves nothing and would hide a real leak. See
+      # CLAUDE.md section 2. The migration step below overrides this with the
+      # superuser URL, because migrations do need those rights.
+      DATABASE_URL: postgresql://propview_app:devpassword@localhost:5432/propview_test
       REDIS_URL: redis://localhost:6379/0
       ENCRYPTION_KEY: FG6ZzLBZnosF1kPSMHKpkDwpdPrinkzVBQ5I9CdMHEE=
       INTERNAL_SERVICE_TOKEN: ci-test-token
@@ -61,8 +82,17 @@ jobs:
           python -m pip install --require-hashes -r services/orchestrator/requirements.lock
           python -m pip install --require-hashes -r services/admin-api/requirements.lock
           python -m pip install --require-hashes -r services/tool-router/requirements.lock
+          # apply_migrations.py imports psycopg, which none of the three locks
+          # above carry -- without this the migration step below dies with
+          # ModuleNotFoundError before a single test runs.
+          python -m pip install --require-hashes -r db/migrations/requirements.lock
       - name: Apply database migrations
         run: python db/migrations/apply_migrations.py
+        env:
+          # Migrations CREATE ROLE/EXTENSION and set default privileges, which
+          # the unprivileged propview_app role cannot do. Only this step gets
+          # superuser; everything after it runs as propview_app.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/propview_test
       - name: Run orchestrator tests
         working-directory: services/orchestrator
         run: |
@@ -83,6 +113,23 @@ jobs:
         run: python -m pytest tests -q
       - name: Run lead-engine tests
         working-directory: services/lead-engine
+        run: python -m pytest tests -q
+
+      # These three were never wired into CI. follow-up-manager matters most:
+      # its run_scan() entrypoint shipped broken (see CLAUDE.md section 16) and
+      # nothing here would have caught it.
+      - name: Run follow-up-manager tests
+        working-directory: services/follow-up-manager
+        run: python -m pytest tests -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/scheduling:${{ github.workspace }}/services/orchestrator
+
+      - name: Run prompts tests
+        working-directory: services/prompts
+        run: python -m pytest tests -q
+
+      - name: Run vap-sidecar tests
+        working-directory: services/vap-sidecar
         run: python -m pytest tests -q
 
   dashboard:

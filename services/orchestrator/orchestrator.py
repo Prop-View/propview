@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compliance"))
-from fair_housing_filter import COMPLIANT_REDIRECT_RESPONSE, check_fair_housing  # noqa: E402
+from fair_housing_filter import check_fair_housing  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))  # append, not insert(0) -- see tool-router/tools/_calendar_context.py
 from sms_dispatch import SmsDispatchError, send_sms  # noqa: E402

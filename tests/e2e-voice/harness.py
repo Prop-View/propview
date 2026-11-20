@@ -97,7 +97,11 @@ async def run_scenario(scenario: Scenario, tool_router_url: str = "http://localh
             await session.send_text(caller_text)
             turn_log = TurnLog(caller_said=caller_text)
 
-            async def drive_one_turn() -> None:
+            # `turn_log` is bound as a default so the closure captures *this*
+            # iteration's log by value. It is awaited immediately below, so the
+            # late-binding bug this guards against cannot bite today -- the
+            # binding is here to keep that true if the await ever moves.
+            async def drive_one_turn(turn_log: TurnLog = turn_log) -> None:
                 nonlocal lead_id
                 async for event in session.receive_events():
                     if isinstance(event, ToolCallRequest):

@@ -24,3 +24,6 @@ dump.rdb
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+
+#claude
+CLAUDE.md

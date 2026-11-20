@@ -14,7 +14,6 @@ Run: DATABASE_URL=postgresql://propview_app:devpassword@localhost/propview_dev \
 import json
 import os
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -178,8 +177,12 @@ def test_book_site_visit_creates_appointment_and_sends_sms(client, property_id):
     mock_twilio_client.messages.create.assert_called_once()
 
     # events().insert() was actually called with our slot's times.
+    # book_site_visit normalizes both ends through client.normalize_datetime(),
+    # so Google receives the same wall-clock time with an explicit UTC offset
+    # (RFC3339, which is what the API expects) rather than the bare naive
+    # string that went in -- hence startswith rather than equality.
     _, kwargs = mock_service.events().insert.call_args
-    assert kwargs["body"]["start"]["dateTime"] == slot_start
+    assert kwargs["body"]["start"]["dateTime"].startswith(slot_start)
 
 
 def test_booking_uses_tenant_calendar_and_sms_settings(client, property_id):

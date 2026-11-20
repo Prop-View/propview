@@ -84,7 +84,10 @@ async def ingest_directory(
             continue
 
         embeddings = embed_chunks(client, chunks)
-        for content, embedding in zip(chunks, embeddings):
+        # strict=True: embeddings are produced one-per-chunk, so a length
+        # mismatch means the embedding provider dropped data. Silently
+        # truncating (zip's default) would store a partial listing.
+        for content, embedding in zip(chunks, embeddings, strict=True):
             await conn.execute(
                 """
                 INSERT INTO knowledge_base_chunks
