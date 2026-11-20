@@ -18,6 +18,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tenant_branding import get_agency_name
+from db import close_pool
+from tenant_settings import get_tenant_call_settings
 
 # os.environ.get, not a hardcoded literal: this file used to hardcode
 # "localhost" (implying the default port 5432), silently ignoring any
@@ -46,6 +48,28 @@ async def _set_agency_name(tenant_id: str, agency_name: str) -> None:
                 """,
                 tenant_id,
                 agency_name,
+            )
+    finally:
+        await conn.close()
+
+
+async def _set_operational_settings(tenant_id: str) -> None:
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tenant_id)
+            await conn.execute(
+                """
+                INSERT INTO tenant_settings (
+                    tenant_id, agency_name, broker_transfer_number, sms_sender_number,
+                    whatsapp_sender_number, time_zone, business_hours_start_hour,
+                    business_hours_end_hour, voice_name, greeting
+                )
+                VALUES ($1, 'Tenant Settings Realty', '+15125550101', '+15125550102',
+                        '+15125550103', 'America/Chicago', 8, 18, 'Kore',
+                        'Thanks for calling Tenant Settings Realty.')
+                """,
+                tenant_id,
             )
     finally:
         await conn.close()
@@ -108,3 +132,21 @@ async def test_scoped_by_rls_not_just_the_query_filter():
         assert name == "fallback name"
     finally:
         await _cleanup(tenant_a)
+
+
+@pytest.mark.asyncio
+async def test_returns_tenant_operational_call_settings():
+    tenant_id = unique_tenant_id()
+    await _set_operational_settings(tenant_id)
+    try:
+        settings = await get_tenant_call_settings(tenant_id, DATABASE_URL)
+        assert settings.agency_name == "Tenant Settings Realty"
+        assert settings.broker_transfer_number == "+15125550101"
+        assert settings.sms_sender_number == "+15125550102"
+        assert settings.time_zone == "America/Chicago"
+        assert settings.business_hours == (8, 18)
+        assert settings.voice_name == "Kore"
+        assert settings.greeting == "Thanks for calling Tenant Settings Realty."
+    finally:
+        await close_pool()
+        await _cleanup(tenant_id)

@@ -67,20 +67,23 @@ a raw connection-capacity load test).
 from __future__ import annotations
 
 import asyncio
-import math
+import json
 import multiprocessing
-import struct
+import queue
 import time
 import uuid
+import os
 
 from livekit import api, rtc
 from locust import User, between, events, task
 
-LIVEKIT_URL = "ws://localhost:7880"
-API_KEY = "devkey"
-API_SECRET = "secret"
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
+API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
+API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
+TENANT_ID = os.environ.get("LOAD_TEST_TENANT_ID", "default")
+CALL_TIMEOUT_SECONDS = int(os.environ.get("LOAD_TEST_CALL_TIMEOUT_SECONDS", "60"))
 CALLER_RATE_HZ = 8000  # mimics a phone leg, same as test_orchestrator_live.py
-TONE_SECONDS = 2.0
+GEMINI_OUTPUT_RATE_HZ = 24000
 
 def _subprocess_entrypoint(error_queue: multiprocessing.Queue) -> None:
     """Runs in a fresh, un-monkey-patched Python process -- see the module
@@ -102,9 +105,17 @@ def _run_one_call_in_subprocess() -> None:
     error_queue = _mp_context.Queue()
     process = _mp_context.Process(target=_subprocess_entrypoint, args=(error_queue,))
     process.start()
-    process.join()
-    if not error_queue.empty():
-        raise RuntimeError(error_queue.get())
+    process.join(CALL_TIMEOUT_SECONDS)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        raise TimeoutError(f"simulated call exceeded {CALL_TIMEOUT_SECONDS} seconds")
+    try:
+        message = error_queue.get(timeout=0.2)
+    except queue.Empty:
+        message = None
+    if message:
+        raise RuntimeError(message)
     if process.exitcode != 0:
         raise RuntimeError(f"simulated-call subprocess exited with code {process.exitcode}")
 
@@ -114,42 +125,68 @@ def _make_token(room_name: str, identity: str) -> str:
     return api.AccessToken(API_KEY, API_SECRET).with_identity(identity).with_grants(grants).to_jwt()
 
 
-def _synth_tone(seconds: float, rate: int, freq: int = 300) -> bytes:
-    n = int(seconds * rate)
-    samples = [int(3000 * math.sin(2 * math.pi * freq * i / rate)) for i in range(n)]
-    return struct.pack(f"<{n}h", *samples)
-
-
 async def _simulate_one_call() -> None:
     room_name = f"load-test-{uuid.uuid4().hex[:8]}"
     caller_room = rtc.Room()
-    agent_room = rtc.Room()
+    agent_audio_received = asyncio.Event()
+
+    def on_track_subscribed(track, _publication, _participant):
+        if track.kind != rtc.TrackKind.KIND_AUDIO:
+            return
+
+        async def receive_first_audio():
+            stream = rtc.AudioStream.from_track(
+                track=track,
+                sample_rate=GEMINI_OUTPUT_RATE_HZ,
+                num_channels=1,
+            )
+            async for event in stream:
+                if event.frame.samples_per_channel:
+                    agent_audio_received.set()
+                    return
+
+        asyncio.create_task(receive_first_audio())
+
+    caller_room.on("track_subscribed", on_track_subscribed)
     try:
         await caller_room.connect(LIVEKIT_URL, _make_token(room_name, "caller"))
-        await agent_room.connect(LIVEKIT_URL, _make_token(room_name, "agent"))
+        lk_api = api.LiveKitAPI(LIVEKIT_URL, API_KEY, API_SECRET)
+        try:
+            await lk_api.agent_dispatch.create_dispatch(
+                api.CreateAgentDispatchRequest(
+                    agent_name="propview-agent",
+                    room=room_name,
+                    metadata=json.dumps({"tenant_id": TENANT_ID}),
+                )
+            )
+        finally:
+            await lk_api.aclose()
 
-        caller_source = rtc.AudioSource(sample_rate=CALLER_RATE_HZ, num_channels=1)
-        caller_track = rtc.LocalAudioTrack.create_audio_track("caller-voice", caller_source)
+        source = rtc.AudioSource(sample_rate=CALLER_RATE_HZ, num_channels=1)
+        track = rtc.LocalAudioTrack.create_audio_track("load-test-caller", source)
         await caller_room.local_participant.publish_track(
-            caller_track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+            track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         )
 
-        tone = _synth_tone(TONE_SECONDS, CALLER_RATE_HZ)
-        frame_samples = CALLER_RATE_HZ * 20 // 1000  # 20ms frames
-        for i in range(0, len(tone), frame_samples * 2):
-            chunk = tone[i : i + frame_samples * 2]
-            if len(chunk) < frame_samples * 2:
+        frame_samples = CALLER_RATE_HZ * 20 // 1000
+        silent_frame = rtc.AudioFrame(
+            data=b"\x00\x00" * frame_samples,
+            sample_rate=CALLER_RATE_HZ,
+            num_channels=1,
+            samples_per_channel=frame_samples,
+        )
+        for _ in range(100):
+            await source.capture_frame(silent_frame)
+            if agent_audio_received.is_set():
                 break
-            frame = rtc.AudioFrame(data=chunk, sample_rate=CALLER_RATE_HZ, num_channels=1, samples_per_channel=frame_samples)
-            await caller_source.capture_frame(frame)
             await asyncio.sleep(0.02)
+        await asyncio.wait_for(agent_audio_received.wait(), timeout=10)
     finally:
         await caller_room.disconnect()
-        await agent_room.disconnect()
 
 
 class SimulatedCallUser(User):
-    wait_time = between(1, 3)
+    wait_time = between(0.2, 1)
 
     @task
     def simulate_call(self) -> None:
@@ -160,8 +197,8 @@ class SimulatedCallUser(User):
         except Exception as exc:  # noqa: BLE001 -- must report to Locust either way
             exception = exc
         events.request.fire(
-            request_type="LiveKit",
-            name="simulated_call",
+            request_type="CallPipeline",
+            name="fake_gemini_full_call",
             response_time=(time.monotonic() - started) * 1000,
             response_length=0,
             exception=exception,

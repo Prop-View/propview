@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -46,7 +47,13 @@ class TimeSlot:
 
 
 class GoogleCalendarClient:
-    def __init__(self, credentials_dict: dict, calendar_id: str = "primary"):
+    def __init__(
+        self,
+        credentials_dict: dict,
+        calendar_id: str = "primary",
+        time_zone: str = "UTC",
+        business_hours: tuple[int, int] = DEFAULT_BUSINESS_HOURS,
+    ):
         """`credentials_dict` -- the decrypted JSON blob from
         tenant_settings (see module docstring). Missing required keys
         raises KeyError immediately rather than failing confusingly on
@@ -59,7 +66,14 @@ class GoogleCalendarClient:
             token_uri=GOOGLE_TOKEN_URI,
         )
         self._calendar_id = calendar_id
+        self.time_zone = ZoneInfo(time_zone)
+        self.business_hours = business_hours
         self._service = build("calendar", "v3", credentials=self._creds, cache_discovery=False)
+
+    def normalize_datetime(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=self.time_zone)
+        return value.astimezone(self.time_zone)
 
     def _list_busy_slots_sync(self, time_min: datetime, time_max: datetime) -> list[TimeSlot]:
         body = {"timeMin": time_min.isoformat(), "timeMax": time_max.isoformat(), "items": [{"id": self._calendar_id}]}
@@ -72,21 +86,26 @@ class GoogleCalendarClient:
         time_min: datetime,
         time_max: datetime,
         duration_minutes: int = DEFAULT_SLOT_MINUTES,
-        business_hours: tuple[int, int] = DEFAULT_BUSINESS_HOURS,
+        business_hours: tuple[int, int] | None = None,
         max_results: int = 3,
     ) -> list[TimeSlot]:
         """Candidate slots at `duration_minutes` granularity within
         business hours, minus whatever Google's freebusy API reports as
         busy. Returns at most `max_results` -- the plan's demo scenario
         wants "the next 3 available slots," not an exhaustive list."""
+        time_min = self.normalize_datetime(time_min)
+        time_max = self.normalize_datetime(time_max)
         busy = await asyncio.to_thread(self._list_busy_slots_sync, time_min, time_max)
 
         open_slots: list[TimeSlot] = []
         cursor = time_min
         duration = timedelta(minutes=duration_minutes)
-        start_hour, end_hour = business_hours
+        start_hour, end_hour = business_hours or self.business_hours
         while cursor < time_max and len(open_slots) < max_results:
-            if not (start_hour <= cursor.hour < end_hour):
+            if cursor.hour < start_hour:
+                cursor = cursor.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                continue
+            if cursor.hour >= end_hour:
                 # Jump to the next day's business-hours start rather than
                 # stepping one slot at a time through the night.
                 next_day = (cursor + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)

@@ -24,15 +24,11 @@ prototyping. For real inbound SIP calls, that "something" is
 infra/livekit/dispatch-rule.json's `roomConfig.agents` entry, which must
 name the exact same agent_name as below.
 
-Per-tenant resolution: a dispatch job can carry a freeform metadata
-string, set by whichever dispatch rule routed the call here (or an
-explicit CreateDispatch call, or a RoomAgentDispatch token entry) --
-read via `ctx.job.metadata` below. This replaces main.py's single
-process-wide TENANT_ID env var, which can't vary per call: a real
-deployment serving multiple agencies needs each tenant's own dispatch
-rule carrying that tenant's tenant_id as metadata (see
-infra/livekit/dispatch-rule.json and its README for the one-rule-per-tenant
-pattern this implies).
+Per-tenant resolution uses the dialed E.164 DID in the SIP participant's
+`sip.trunkPhoneNumber` attribute and the platform phone-number registry.
+Unknown, inactive, or missing mappings end the room; there is no default
+tenant fallback. The attribute's meaning is documented by LiveKit at
+https://docs.livekit.io/reference/telephony/sip-participant.md.
 
 Run:
     python worker.py dev     # connects to LIVEKIT_URL, waits for dispatched jobs
@@ -49,53 +45,118 @@ script used to verify this.
 from __future__ import annotations
 
 import json
+import atexit
 import logging
 import os
 
 from dotenv import load_dotenv
-from livekit import agents
 
-from call_session import run_orchestrator_on_room
+load_dotenv()
+
+from livekit import agents, api, rtc
+
+from db import terminate_pool
+from call_lifecycle import WorkerDraining, is_draining
+from call_session import (
+    DATABASE_URL,
+    LIVEKIT_API_KEY,
+    LIVEKIT_API_SECRET,
+    LIVEKIT_URL,
+    run_orchestrator_on_room,
+)
 from metrics import start_metrics_server
-
-load_dotenv()  # before the decorator below runs -- see the module docstring's ordering note
+from tenant_registry import resolve_tenant_by_phone
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("worker")
+atexit.register(terminate_pool)
 
 # Must match infra/livekit/dispatch-rule.json's roomConfig.agents[].agentName
 # exactly, or real inbound calls will never reach this worker. Not read from
 # an env var deliberately -- see the module docstring on why that ordering
 # is fragile with a decorator that runs at import time.
 AGENT_NAME = "propview-agent"
-DEFAULT_TENANT_ID = os.environ.get("TENANT_ID", "default")
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9090"))
+SIP_DIALED_NUMBER_ATTRIBUTE = "sip.trunkPhoneNumber"
+
+
+class TenantResolutionError(RuntimeError):
+    pass
+
 
 server = agents.AgentServer()
 
 
-def _resolve_tenant_id(ctx: agents.JobContext) -> str:
-    """Per-call tenant resolution -- see the module docstring's "Per-tenant
-    resolution" section. Falls back to DEFAULT_TENANT_ID (same default
-    main.py uses) if metadata is empty/unset (e.g. a dev-time test room
-    created without it) or isn't valid JSON, so a misconfigured dispatch
-    rule degrades to "handled as the default tenant," not a crashed job."""
-    if not ctx.job.metadata:
-        return DEFAULT_TENANT_ID
+def _get_dialed_number(room: rtc.Room) -> str:
+    sip_participants = [
+        participant
+        for participant in room.remote_participants.values()
+        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+    ]
+    if len(sip_participants) != 1:
+        raise TenantResolutionError("Expected exactly one SIP caller in the dispatched room")
+
+    dialed_number = sip_participants[0].attributes.get(SIP_DIALED_NUMBER_ATTRIBUTE)
+    if not dialed_number:
+        raise TenantResolutionError("LiveKit SIP participant has no dialed-number attribute")
+    return dialed_number
+
+
+async def _resolve_tenant_id(ctx: agents.JobContext) -> str:
+    if os.environ.get("GEMINI_SESSION_MODE", "live").lower() == "fake":
+        if os.environ.get("ENVIRONMENT") != "load":
+            raise TenantResolutionError("Fake Gemini mode is restricted to local load tests")
+        try:
+            metadata = json.loads(ctx.job.metadata or "{}")
+        except json.JSONDecodeError as exc:
+            raise TenantResolutionError("Load-test dispatch metadata must be valid JSON") from exc
+        tenant_id = metadata.get("tenant_id", "default")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise TenantResolutionError("Load-test dispatch metadata needs a tenant_id")
+        return tenant_id
+
+    if not DATABASE_URL:
+        raise TenantResolutionError("DATABASE_URL is required for inbound tenant resolution")
+
+    dialed_number = _get_dialed_number(ctx.room)
+    tenant_id = await resolve_tenant_by_phone(DATABASE_URL, dialed_number)
+    if tenant_id is None:
+        raise TenantResolutionError("No active tenant is mapped to this inbound number")
+    return tenant_id
+
+
+async def _end_unresolved_call(ctx: agents.JobContext) -> None:
+    lk_api = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
     try:
-        data = json.loads(ctx.job.metadata)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("Job metadata isn't valid JSON, falling back to tenant %r: %r", DEFAULT_TENANT_ID, ctx.job.metadata)
-        return DEFAULT_TENANT_ID
-    return data.get("tenant_id", DEFAULT_TENANT_ID)
+        await lk_api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
+    finally:
+        await lk_api.aclose()
 
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def handle_call(ctx: agents.JobContext) -> None:
     await ctx.connect()
-    tenant_id = _resolve_tenant_id(ctx)
+    if is_draining():
+        logger.info("Rejecting dispatched room %r because the worker is draining", ctx.room.name)
+        await _end_unresolved_call(ctx)
+        return
+    try:
+        tenant_id = await _resolve_tenant_id(ctx)
+    except TenantResolutionError as exc:
+        logger.error("Ending inbound call because tenant resolution failed: %s", exc)
+        await _end_unresolved_call(ctx)
+        return
+    except Exception:
+        logger.exception("Inbound tenant lookup failed; ending call rather than using a fallback tenant")
+        await _end_unresolved_call(ctx)
+        raise
+
     logger.info("Dispatched into room %r for tenant %r", ctx.room.name, tenant_id)
-    await run_orchestrator_on_room(ctx.room, tenant_id)
+    try:
+        await run_orchestrator_on_room(ctx.room, tenant_id)
+    except WorkerDraining:
+        logger.info("Rejecting dispatched room %r because the worker began draining", ctx.room.name)
+        await _end_unresolved_call(ctx)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,16 @@ def test_health(client):
     assert resp.json() == {"status": "ok"}
 
 
+def test_readiness_checks_postgres_and_redis(client):
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ready",
+        "service": "tool-router",
+        "dependencies": {"postgres": "connected", "redis": "connected"},
+    }
+
+
 def test_search_properties_filters_correctly(client):
     resp = call_tool(client, "search_properties", {"city": "Austin", "property_type": "house", "min_beds": 3, "max_price": 550000})
     assert resp.status_code == 200

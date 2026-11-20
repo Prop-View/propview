@@ -52,6 +52,7 @@ async def _seed() -> None:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
     await conn.execute("DELETE FROM appointments WHERE tenant_id = $1", TEST_TENANT)
+    await conn.execute("DELETE FROM usage_events WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM leads WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM contacts WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
@@ -80,6 +81,7 @@ async def _cleanup() -> None:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
     await conn.execute("DELETE FROM appointments WHERE tenant_id = $1", TEST_TENANT)
+    await conn.execute("DELETE FROM usage_events WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM leads WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM contacts WHERE tenant_id = $1", TEST_TENANT)
     await conn.execute("DELETE FROM properties WHERE tenant_id = $1", TEST_TENANT)
@@ -178,6 +180,86 @@ def test_book_site_visit_creates_appointment_and_sends_sms(client, property_id):
     # events().insert() was actually called with our slot's times.
     _, kwargs = mock_service.events().insert.call_args
     assert kwargs["body"]["start"]["dateTime"] == slot_start
+
+
+def test_booking_uses_tenant_calendar_and_sms_settings(client, property_id):
+    async def set_tenant_settings(time_zone, start_hour, end_hour, sender):
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        try:
+            await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
+            await conn.execute(
+                """
+                UPDATE tenant_settings
+                SET time_zone = $2,
+                    business_hours_start_hour = $3,
+                    business_hours_end_hour = $4,
+                    sms_sender_number = $5
+                WHERE tenant_id = $1
+                """,
+                TEST_TENANT,
+                time_zone,
+                start_hour,
+                end_hour,
+                sender,
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(set_tenant_settings("America/Chicago", 9, 17, "+15125550999"))
+    try:
+        availability_service = _mock_calendar_build()
+        with patch("calendar_client.build", return_value=availability_service):
+            availability = call_tool(
+                client,
+                "check_calendar_slots",
+                {"earliest": "2026-09-08T08:30:00", "search_days": 1},
+            )
+        assert availability.status_code == 200
+        available_slot = availability.json()["result"]["available_slots"][0]["start"]
+        assert available_slot == "2026-09-08T09:00:00-05:00"
+        _, freebusy_kwargs = availability_service.freebusy().query.call_args
+        assert freebusy_kwargs["body"]["timeMin"] == "2026-09-08T08:30:00-05:00"
+
+        booking_service = _mock_calendar_build()
+        with patch("calendar_client.build", return_value=booking_service), patch(
+            "sms_dispatch.Client"
+        ) as twilio_client_class:
+            twilio_client = MagicMock()
+            twilio_client.messages.create.return_value = MagicMock(sid="SM_tenant_settings")
+            twilio_client_class.return_value = twilio_client
+            booking = call_tool(
+                client,
+                "book_site_visit",
+                {
+                    "property_id": property_id,
+                    "slot_start": "2026-09-09T10:00:00",
+                    "slot_end": "2026-09-09T10:30:00",
+                },
+                caller_phone_number="+15125550202",
+            )
+
+        assert booking.status_code == 200
+        twilio_client.messages.create.assert_called_once()
+        assert twilio_client.messages.create.call_args.kwargs["from_"] == "+15125550999"
+
+        async def count_sms_usage():
+            conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+            try:
+                await conn.execute("SELECT set_config('app.tenant_id', $1, false)", TEST_TENANT)
+                return await conn.fetchval(
+                    """
+                    SELECT count(*) FROM usage_events
+                    WHERE tenant_id = $1 AND event_type = 'sms'
+                      AND source_id = 'SM_tenant_settings'
+                    """,
+                    TEST_TENANT,
+                )
+            finally:
+                await conn.close()
+
+        assert asyncio.run(count_sms_usage()) == 1
+    finally:
+        asyncio.run(set_tenant_settings(None, None, None, None))
 
 
 def test_book_site_visit_requires_caller_phone_number(client, property_id):

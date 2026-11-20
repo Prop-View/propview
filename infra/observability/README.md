@@ -36,7 +36,7 @@ correctly-labeled sample values) — not just "the function didn't throw."
 cd infra/observability
 docker compose up
 # Prometheus: http://localhost:9091 (host 9090 is the orchestrator's own /metrics)
-# Grafana:    http://localhost:3000 (anonymous viewer access enabled for local dev)
+# Grafana:    http://localhost:3000 (login required; use GRAFANA_ADMIN_USER/PASSWORD)
 ```
 
 Grafana is pre-provisioned (`grafana/provisioning/`) with the Prometheus

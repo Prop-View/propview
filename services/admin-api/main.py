@@ -12,24 +12,53 @@ from __future__ import annotations
 
 import json
 import os
+import csv
+import io
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()  # real gap found 2026-09-09: this was never called here --
 # see services/tool-router/main.py's identical fix for the full story.
 
-from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
+from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
+from pydantic import BaseModel, Field, ValidationError  # noqa: E402
+from redis.exceptions import RedisError  # noqa: E402
 
-from auth import generate_api_key, hash_key, require_platform_token, require_tenant_auth  # noqa: E402
+from accounts import router as accounts_router  # noqa: E402
+from audit import write_audit  # noqa: E402
+from billing import router as billing_router  # noqa: E402
+from auth import (  # noqa: E402
+    AuthPrincipal,
+    generate_api_key,
+    hash_key,
+    require_machine_api_key,
+    require_owner,
+    require_owner_or_machine,
+    require_platform_token,
+    require_tenant_auth,
+)
+from calendar_oauth import router as calendar_oauth_router  # noqa: E402
 from crypto import decrypt, encrypt  # noqa: E402
 from db import close_pool, get_pool, tenant_connection  # noqa: E402
-from rate_limit import DASHBOARD_LIMIT, PROVISION_LIMIT, rate_limited  # noqa: E402
-from redis_client import close_redis_client  # noqa: E402
+from knowledge_upload import ingest_document  # noqa: E402
+from rate_limit import (  # noqa: E402
+    DASHBOARD_LIMIT,
+    DEFAULT_LIMIT,
+    PROVISION_LIMIT,
+    platform_rate_limited,
+    rate_limited,
+)
+from redis_client import close_redis_client, get_redis_client  # noqa: E402
+from webhooks import router as webhooks_router  # noqa: E402
 
 
 def _row_to_dict(row) -> dict:
@@ -38,6 +67,36 @@ def _row_to_dict(row) -> dict:
         if isinstance(value, Decimal):
             out[key] = float(value)
         elif key == "amenities" and isinstance(value, str):
+            out[key] = json.loads(value)
+    return out
+
+
+def _export_json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError("Sensitive binary values are not included in tenant exports")
+    raise TypeError(f"Unsupported export value: {type(value).__name__}")
+
+
+def _export_row(row) -> dict:
+    out = dict(row)
+    json_fields = {
+        "amenities",
+        "tools_used",
+        "input_params",
+        "output_result",
+        "evidence",
+        "metadata",
+        "events",
+        "payload",
+    }
+    for key, value in out.items():
+        if key in json_fields and isinstance(value, str):
             out[key] = json.loads(value)
     return out
 
@@ -71,6 +130,67 @@ class BrandingRequest(BaseModel):
     agency_name: str
 
 
+class TenantRegistryRequest(BaseModel):
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    name: str = Field(min_length=1, max_length=200)
+    status: Literal["pending", "active", "suspended"] = "active"
+    plan: str = Field(default="starter", min_length=1, max_length=80)
+
+
+class TenantPhoneNumberRequest(BaseModel):
+    tenant_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    phone_number: str = Field(pattern=r"^\+[1-9][0-9]{1,14}$")
+
+
+class TenantPhoneNumberRemovalRequest(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9][0-9]{1,14}$")
+
+
+class TenantOperationalSettingsRequest(BaseModel):
+    broker_transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{1,14}$")
+    sms_sender_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{1,14}$")
+    whatsapp_sender_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{1,14}$")
+    time_zone: str | None = Field(default=None, min_length=1, max_length=100)
+    business_hours_start_hour: int | None = Field(default=None, ge=0, le=23)
+    business_hours_end_hour: int | None = Field(default=None, ge=1, le=24)
+    voice_name: str | None = Field(default=None, min_length=1, max_length=80)
+    greeting: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class LeadUpdateRequest(BaseModel):
+    status: Literal["new", "qualified", "appointment_set", "closed_won", "closed_lost"] | None = None
+    notes: str | None = Field(default=None, max_length=10000)
+
+
+class AppointmentUpdateRequest(BaseModel):
+    scheduled_at: datetime | None = None
+    status: Literal["cancelled"] | None = None
+
+
+class ListingUpdateRequest(BaseModel):
+    address: str | None = Field(default=None, min_length=1, max_length=500)
+    city: str | None = Field(default=None, min_length=1, max_length=200)
+    state: str | None = Field(default=None, min_length=1, max_length=100)
+    property_type: Literal["house", "condo", "townhouse", "land"] | None = None
+    status: Literal["active", "pending", "sold", "off_market"] | None = None
+    beds: int | None = None
+    baths: float | None = None
+    sqft: int | None = None
+    price: float | None = None
+    hoa_fee: float | None = None
+    listing_agent: str | None = None
+    amenities: list[str] | None = None
+    project_id: int | None = None
+
+
+class DataRetentionPolicyRequest(BaseModel):
+    retention_days: int = Field(ge=1)
+
+
+class TenantDataDeletionConfirmation(BaseModel):
+    confirm_tenant_id: str = Field(min_length=1, max_length=128)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_pool()
@@ -80,6 +200,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Propview Tenant Admin API", lifespan=lifespan)
+app.include_router(accounts_router)
+app.include_router(billing_router)
+app.include_router(calendar_oauth_router)
+app.include_router(webhooks_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,6 +230,10 @@ async def provision_tenant(tenant_id: str):
     the old key). Gated by the platform operator token, not a tenant key,
     since no tenant key exists yet for a brand-new tenant."""
     api_key = generate_api_key()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("SELECT public.platform_ensure_tenant($1)", tenant_id)
+
     async with tenant_connection(tenant_id) as conn:
         await conn.execute(
             """
@@ -121,17 +249,127 @@ async def provision_tenant(tenant_id: str):
     return {"tenant_id": tenant_id, "admin_api_key": api_key}
 
 
+@app.get(
+    "/admin/platform/tenants",
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(platform_rate_limited(DEFAULT_LIMIT, budget="platform-read")),
+    ],
+)
+async def list_platform_tenants():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT slug, name, status, plan, created_at
+            FROM public.platform_list_tenants()
+            """
+        )
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.post(
+    "/admin/platform/tenants",
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(platform_rate_limited(PROVISION_LIMIT, budget="platform-write")),
+    ],
+)
+async def upsert_platform_tenant(request: TenantRegistryRequest):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "SELECT public.platform_upsert_tenant($1, $2, $3, $4)",
+            request.slug,
+            request.name,
+            request.status,
+            request.plan,
+        )
+    return {"slug": request.slug, "name": request.name, "status": request.status, "plan": request.plan}
+
+
+@app.get(
+    "/admin/platform/phone-numbers",
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(platform_rate_limited(DEFAULT_LIMIT, budget="platform-read")),
+    ],
+)
+async def list_platform_phone_numbers():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT phone_number, tenant_id, created_at
+            FROM public.platform_list_tenant_phone_numbers()
+            """
+        )
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.put(
+    "/admin/platform/phone-numbers",
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(platform_rate_limited(PROVISION_LIMIT, budget="platform-write")),
+    ],
+)
+async def set_platform_phone_number(request: TenantPhoneNumberRequest):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "SELECT public.platform_set_tenant_phone_number($1, $2)",
+                request.phone_number,
+                request.tenant_id,
+            )
+        except asyncpg.ForeignKeyViolationError as exc:
+            raise HTTPException(status_code=404, detail="Tenant not found") from exc
+    return {"phone_number": request.phone_number, "tenant_id": request.tenant_id}
+
+
+@app.delete(
+    "/admin/platform/phone-numbers",
+    dependencies=[
+        Depends(require_platform_token),
+        Depends(platform_rate_limited(PROVISION_LIMIT, budget="platform-write")),
+    ],
+)
+async def remove_platform_phone_number(request: TenantPhoneNumberRemovalRequest):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        removed = await conn.fetchval(
+            "SELECT public.platform_remove_tenant_phone_number($1)",
+            request.phone_number,
+        )
+    if not removed:
+        raise HTTPException(status_code=404, detail="Phone number mapping not found")
+    return {"phone_number": request.phone_number, "removed": True}
+
+
 @app.post(
     "/admin/tenants/{tenant_id}/listings",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
 )
-async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
+async def upload_listings(
+    tenant_id: str,
+    request: ListingsUploadRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
     if not request.listings:
         raise HTTPException(status_code=400, detail="listings must not be empty")
 
     inserted_ids = []
     async with tenant_connection(tenant_id) as conn:
         for listing in request.listings:
+            if listing.project_id is not None:
+                project_exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE tenant_id = $1 AND id = $2)",
+                    tenant_id,
+                    listing.project_id,
+                )
+                if not project_exists:
+                    raise HTTPException(status_code=404, detail="Project not found")
             row_id = await conn.fetchval(
                 """
                 INSERT INTO properties
@@ -156,15 +394,301 @@ async def upload_listings(tenant_id: str, request: ListingsUploadRequest):
                 json.dumps(listing.amenities),
             )
             inserted_ids.append(row_id)
+        await write_audit(
+            conn, tenant_id, "listing.bulk_uploaded", principal.user_id,
+            "property", metadata={"count": len(inserted_ids)},
+        )
 
     return {"inserted": len(inserted_ids), "ids": inserted_ids}
 
 
-@app.put(
-    "/admin/tenants/{tenant_id}/branding",
+@app.post(
+    "/admin/tenants/{tenant_id}/listings/upload-csv",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def upload_listings_csv(
+    tenant_id: str,
+    file: UploadFile = File(...),
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    contents = await file.read(5 * 1024 * 1024 + 1)
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CSV exceeds the 5 MiB limit")
+    try:
+        text = contents.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="CSV must be UTF-8 encoded") from exc
+
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    required = {"address", "city", "state", "property_type", "price"}
+    allowed = set(ListingUpload.model_fields)
+    headers = set(reader.fieldnames or [])
+    if (
+        not required.issubset(headers)
+        or not headers.issubset(allowed)
+        or len(headers) != len(reader.fieldnames or [])
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "CSV headers are missing required fields or contain unsupported fields",
+                "required": sorted(required),
+                "supported": sorted(allowed),
+            },
+        )
+    listings = []
+    for row_number, row in enumerate(reader, start=2):
+        if None in row:
+            raise HTTPException(status_code=422, detail=f"CSV row {row_number} has extra values")
+        normalized = {
+            key: (value.strip() if value is not None else None)
+            for key, value in row.items()
+        }
+        if normalized.get("amenities") is not None:
+            normalized["amenities"] = [
+                amenity.strip()
+                for amenity in normalized["amenities"].split("|")
+                if amenity.strip()
+            ]
+        for key in ("beds", "baths", "sqft", "hoa_fee", "listing_agent", "project_id"):
+            if normalized.get(key) == "":
+                normalized[key] = None
+        try:
+            listings.append(ListingUpload.model_validate(normalized))
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"row": row_number, "errors": exc.errors()},
+            ) from exc
+        if len(listings) > 500:
+            raise HTTPException(status_code=413, detail="CSV may contain at most 500 listings")
+    if not listings:
+        raise HTTPException(status_code=400, detail="CSV contains no listings")
+
+    inserted_ids = []
+    async with tenant_connection(tenant_id) as conn:
+        for listing in listings:
+            if listing.project_id is not None:
+                project_exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE tenant_id = $1 AND id = $2)",
+                    tenant_id,
+                    listing.project_id,
+                )
+                if not project_exists:
+                    raise HTTPException(status_code=404, detail="Project not found")
+            row_id = await conn.fetchval(
+                """
+                INSERT INTO properties
+                    (tenant_id, project_id, address, city, state, property_type, status,
+                     beds, baths, sqft, price, hoa_fee, listing_agent, amenities)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+                RETURNING id
+                """,
+                tenant_id, listing.project_id, listing.address, listing.city,
+                listing.state, listing.property_type, listing.status,
+                listing.beds, listing.baths, listing.sqft, listing.price,
+                listing.hoa_fee, listing.listing_agent, json.dumps(listing.amenities),
+            )
+            inserted_ids.append(row_id)
+        await write_audit(
+            conn, tenant_id, "listing.csv_uploaded", principal.user_id, "property",
+            metadata={"count": len(inserted_ids), "filename": file.filename},
+        )
+    return {"inserted": len(inserted_ids), "ids": inserted_ids}
+
+
+@app.patch(
+    "/admin/tenants/{tenant_id}/leads/{lead_id}",
     dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
 )
-async def set_branding(tenant_id: str, request: BrandingRequest):
+async def update_lead(
+    tenant_id: str,
+    lead_id: int,
+    request: LeadUpdateRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="At least one lead field must be provided")
+    columns = list(updates)
+    assignments = ", ".join(f"{column} = ${index + 3}" for index, column in enumerate(columns))
+    values = [tenant_id, lead_id, *(updates[column] for column in columns)]
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE leads SET {assignments}, updated_at = now()
+            WHERE tenant_id = $1 AND id = $2
+            RETURNING id, status, notes, updated_at
+            """,
+            *values,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        await write_audit(
+            conn, tenant_id, "lead.updated", principal.user_id, "lead", lead_id,
+            {"fields": columns},
+        )
+    return dict(row)
+
+
+@app.patch(
+    "/admin/tenants/{tenant_id}/appointments/{appointment_id}",
+    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+)
+async def update_appointment(
+    tenant_id: str,
+    appointment_id: int,
+    request: AppointmentUpdateRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide scheduled_at to reschedule or status=cancelled to cancel",
+        )
+    scheduled_at = updates.get("scheduled_at")
+    if scheduled_at is not None:
+        if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
+            raise HTTPException(status_code=422, detail="scheduled_at must include a timezone")
+        if scheduled_at <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=422, detail="scheduled_at must be in the future")
+    columns = list(updates)
+    assignments = ", ".join(f"{column} = ${index + 3}" for index, column in enumerate(columns))
+    values = [tenant_id, appointment_id, *(updates[column] for column in columns)]
+    async with tenant_connection(tenant_id) as conn:
+        current = await conn.fetchrow(
+            "SELECT status FROM appointments WHERE tenant_id = $1 AND id = $2",
+            tenant_id,
+            appointment_id,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+        if current["status"] in {"cancelled", "completed"}:
+            raise HTTPException(status_code=409, detail="Appointment can no longer be changed")
+        row = await conn.fetchrow(
+            f"""
+            UPDATE appointments SET {assignments}
+            WHERE tenant_id = $1 AND id = $2
+            RETURNING id, status, scheduled_at
+            """,
+            *values,
+        )
+        await write_audit(
+            conn, tenant_id, "appointment.updated", principal.user_id, "appointment",
+            appointment_id, {"fields": columns},
+        )
+    return dict(row)
+
+
+@app.patch(
+    "/admin/tenants/{tenant_id}/properties/{property_id}",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def update_listing(
+    tenant_id: str,
+    property_id: int,
+    request: ListingUpdateRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="At least one listing field must be provided")
+    non_nullable = {"address", "city", "state", "property_type", "status", "price", "amenities"}
+    if any(field in updates and updates[field] is None for field in non_nullable):
+        raise HTTPException(status_code=422, detail="Required listing fields cannot be cleared")
+    if "project_id" in updates and updates["project_id"] is not None:
+        async with tenant_connection(tenant_id) as conn:
+            exists = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE tenant_id = $1 AND id = $2)",
+                tenant_id,
+                updates["project_id"],
+            )
+        if not exists:
+            raise HTTPException(status_code=404, detail="Project not found")
+    if "amenities" in updates and updates["amenities"] is not None:
+        updates["amenities"] = json.dumps(updates["amenities"])
+    columns = list(updates)
+    assignments = ", ".join(
+        f"{column} = ${index + 3}" + ("::jsonb" if column == "amenities" else "")
+        for index, column in enumerate(columns)
+    )
+    values = [tenant_id, property_id, *(updates[column] for column in columns)]
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE properties SET {assignments}, updated_at = now()
+            WHERE tenant_id = $1 AND id = $2
+            RETURNING id, address, city, state, property_type, status, beds, baths,
+                      sqft, price, hoa_fee, listing_agent, amenities, updated_at
+            """,
+            *values,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        await write_audit(
+            conn, tenant_id, "listing.updated", principal.user_id, "property",
+            property_id, {"fields": columns},
+        )
+    return _row_to_dict(row)
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/properties/{property_id}",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def delete_listing(
+    tenant_id: str,
+    property_id: int,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    async with tenant_connection(tenant_id) as conn:
+        deleted = await conn.fetchval(
+            "DELETE FROM properties WHERE tenant_id = $1 AND id = $2 RETURNING id",
+            tenant_id,
+            property_id,
+        )
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        await write_audit(
+            conn, tenant_id, "listing.deleted", principal.user_id, "property", property_id
+        )
+    return {"id": deleted, "deleted": True}
+
+
+@app.post(
+    "/admin/tenants/{tenant_id}/knowledge-base/documents",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def upload_knowledge_document(
+    tenant_id: str,
+    file: UploadFile = File(...),
+    source_type: Literal["faq", "policy", "brochure", "transcript", "other"] = Form("other"),
+    project_id: int | None = Form(default=None),
+    property_id: int | None = Form(default=None),
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    chunks = await ingest_document(
+        tenant_id, file, source_type, project_id, property_id
+    )
+    async with tenant_connection(tenant_id) as conn:
+        await write_audit(
+            conn, tenant_id, "knowledge_base.document_uploaded", principal.user_id,
+            "knowledge_base_document", file.filename,
+            {"source_type": source_type, "chunk_count": chunks},
+        )
+    return {"filename": file.filename, "chunks_created": chunks}
+
+
+@app.put(
+    "/admin/tenants/{tenant_id}/branding",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def set_branding(
+    tenant_id: str,
+    request: BrandingRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
     """docs/AGENCY_ONBOARDING.md Stage 2b -- per-tenant agency name,
     looked up by services/orchestrator/tenant_branding.py at call start.
     Same upsert shape as set_calendar_credentials below, same table."""
@@ -180,6 +704,10 @@ async def set_branding(tenant_id: str, request: BrandingRequest):
             tenant_id,
             request.agency_name,
         )
+        await write_audit(
+            conn, tenant_id, "branding.updated", principal.user_id,
+            "tenant_settings", tenant_id,
+        )
     return {"status": "ok"}
 
 
@@ -193,11 +721,133 @@ async def get_branding(tenant_id: str):
     return {"agency_name": row["agency_name"] if row else None}
 
 
-@app.put(
-    "/admin/tenants/{tenant_id}/calendar-credentials",
+OPERATIONAL_SETTING_COLUMNS = (
+    "broker_transfer_number",
+    "sms_sender_number",
+    "whatsapp_sender_number",
+    "time_zone",
+    "business_hours_start_hour",
+    "business_hours_end_hour",
+    "voice_name",
+    "greeting",
+)
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/settings",
     dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
 )
-async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsRequest):
+async def get_tenant_operational_settings(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"SELECT {', '.join(OPERATIONAL_SETTING_COLUMNS)} FROM tenant_settings WHERE tenant_id = $1",
+            tenant_id,
+        )
+    return {
+        column: row[column] if row else None
+        for column in OPERATIONAL_SETTING_COLUMNS
+    }
+
+
+@app.put(
+    "/admin/tenants/{tenant_id}/settings",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def set_tenant_operational_settings(
+    tenant_id: str,
+    request: TenantOperationalSettingsRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="At least one setting must be provided")
+    if any(column not in OPERATIONAL_SETTING_COLUMNS for column in updates):
+        raise HTTPException(status_code=400, detail="Unsupported setting")
+
+    time_zone = updates.get("time_zone")
+    if time_zone is not None:
+        try:
+            ZoneInfo(time_zone)
+        except ZoneInfoNotFoundError as exc:
+            raise HTTPException(status_code=422, detail="time_zone must be a valid IANA time zone") from exc
+
+    async with tenant_connection(tenant_id) as conn:
+        current_hours = await conn.fetchrow(
+            """
+            SELECT business_hours_start_hour, business_hours_end_hour
+            FROM tenant_settings
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        start_hour = updates.get(
+            "business_hours_start_hour",
+            current_hours["business_hours_start_hour"] if current_hours else None,
+        )
+        end_hour = updates.get(
+            "business_hours_end_hour",
+            current_hours["business_hours_end_hour"] if current_hours else None,
+        )
+        if (start_hour is None) != (end_hour is None) or (
+            start_hour is not None and end_hour is not None and start_hour >= end_hour
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Business hours must be set or cleared as a valid start/end pair",
+            )
+
+        columns = list(updates)
+        values = [tenant_id, *(updates[column] for column in columns)]
+        insert_columns = ", ".join(("tenant_id", *columns))
+        placeholders = ", ".join(f"${index}" for index in range(1, len(values) + 1))
+        assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in columns)
+        await conn.execute(
+            f"""
+            INSERT INTO tenant_settings ({insert_columns}, updated_at)
+            VALUES ({placeholders}, now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                {assignments},
+                updated_at = now()
+            """,
+            *values,
+        )
+        await write_audit(
+            conn, tenant_id, "tenant_settings.updated", principal.user_id,
+            "tenant_settings", tenant_id, {"fields": columns},
+        )
+    return {"status": "ok"}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/usage/monthly",
+    dependencies=[
+        Depends(require_tenant_auth),
+        Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard")),
+    ],
+)
+async def get_monthly_usage(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT month, event_type, event_count, units
+            FROM monthly_usage
+            WHERE tenant_id = $1
+            ORDER BY month, event_type
+            """,
+            tenant_id,
+        )
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.put(
+    "/admin/tenants/{tenant_id}/calendar-credentials",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited())],
+)
+async def set_calendar_credentials(
+    tenant_id: str,
+    request: CalendarCredentialsRequest,
+    principal: AuthPrincipal = Depends(require_tenant_auth),
+):
     encrypted = encrypt(json.dumps(request.credentials))
     async with tenant_connection(tenant_id) as conn:
         await conn.execute(
@@ -213,12 +863,16 @@ async def set_calendar_credentials(tenant_id: str, request: CalendarCredentialsR
             request.provider,
             encrypted,
         )
+        await write_audit(
+            conn, tenant_id, "calendar.credentials_updated", principal.user_id,
+            "tenant_settings", tenant_id, {"provider": request.provider},
+        )
     return {"status": "ok"}
 
 
 @app.get(
     "/admin/tenants/{tenant_id}/calendar-credentials",
-    dependencies=[Depends(require_tenant_auth), Depends(rate_limited())],
+    dependencies=[Depends(require_machine_api_key), Depends(rate_limited())],
 )
 async def get_calendar_credentials(tenant_id: str):
     async with tenant_connection(tenant_id) as conn:
@@ -292,7 +946,7 @@ async def list_leads(
         conditions.append(f"l.status = ${len(params)}")
     params.extend([limit, offset])
     query = f"""
-        SELECT l.id, l.contact_id, c.full_name, c.phone_number, c.email,
+        SELECT l.id, l.contact_id, c.full_name, c.phone_number, c.email, l.notes,
                l.intent, l.budget_min, l.budget_max, l.timeline,
                l.decision_maker, l.priority, l.status, l.property_id,
                l.created_at, l.updated_at
@@ -424,6 +1078,314 @@ async def get_call_detail(tenant_id: str, call_id: str):
     }
 
 
+TENANT_EXPORT_QUERIES = {
+    "tenant": """
+        SELECT slug, name, status, plan, created_at
+        FROM public.platform_list_tenants()
+        WHERE slug = $1
+    """,
+    "phone_numbers": """
+        SELECT phone_number, tenant_id, created_at
+        FROM public.platform_list_tenant_phone_numbers()
+        WHERE tenant_id = $1
+    """,
+    "projects": """
+        SELECT id, tenant_id, name, developer, city, state, description, created_at
+        FROM projects WHERE tenant_id = $1 ORDER BY id
+    """,
+    "properties": """
+        SELECT id, tenant_id, project_id, address, city, state, zip_code,
+               property_type, status, beds, baths, sqft, price, hoa_fee,
+               listing_agent, amenities, floor_plan_url, created_at, updated_at
+        FROM properties WHERE tenant_id = $1 ORDER BY id
+    """,
+    "knowledge_base_chunks": """
+        SELECT id, tenant_id, project_id, property_id, source_type,
+               source_name, content, created_at
+        FROM knowledge_base_chunks WHERE tenant_id = $1 ORDER BY id
+    """,
+    "contacts": """
+        SELECT id, tenant_id, full_name, phone_number, email, created_at
+        FROM contacts WHERE tenant_id = $1 ORDER BY id
+    """,
+    "leads": """
+        SELECT id, tenant_id, contact_id, property_id, intent, budget_min,
+               budget_max, timeline, decision_maker, priority, status, notes,
+               created_at, updated_at
+        FROM leads WHERE tenant_id = $1 ORDER BY id
+    """,
+    "appointments": """
+        SELECT id, tenant_id, lead_id, property_id, scheduled_at, status,
+               agent_name, confirmation_sms_sent_at, created_at
+        FROM appointments WHERE tenant_id = $1 ORDER BY id
+    """,
+    "interactions": """
+        SELECT id, tenant_id, contact_id, lead_id, call_id, channel, transcript,
+               duration_seconds, outcome, created_at
+        FROM interactions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "conversation_turns": """
+        SELECT id, tenant_id, call_id, turn_index, speaker, text, interrupted,
+               timestamp_ms, created_at
+        FROM conversation_turns WHERE tenant_id = $1 ORDER BY id
+    """,
+    "tool_invocations": """
+        SELECT id, tenant_id, call_id, turn_index, tool_name, input_params,
+               output_result, error, latency_ms, success, created_at
+        FROM tool_invocations WHERE tenant_id = $1 ORDER BY id
+    """,
+    "call_analytics": """
+        SELECT id, tenant_id, call_id, total_turns, caller_turns, agent_turns,
+               duration_seconds, tools_used, barge_in_count, outcome, lead_id,
+               created_at
+        FROM call_analytics WHERE tenant_id = $1 ORDER BY id
+    """,
+    "follow_ups": """
+        SELECT id, tenant_id, lead_id, appointment_id, kind, sent_at
+        FROM follow_ups WHERE tenant_id = $1 ORDER BY id
+    """,
+    "consent_records": """
+        SELECT id, tenant_id, contact_id, call_id, purpose, granted,
+               capture_method, captured_at, evidence, created_at
+        FROM consent_records WHERE tenant_id = $1 ORDER BY id
+    """,
+    "retention_policy": """
+        SELECT tenant_id, retention_days, updated_at
+        FROM tenant_data_retention WHERE tenant_id = $1
+    """,
+    "tenant_settings": """
+        SELECT tenant_id, calendar_provider, agency_name, broker_transfer_number,
+               sms_sender_number, whatsapp_sender_number, time_zone,
+               business_hours_start_hour, business_hours_end_hour, voice_name,
+               greeting, updated_at
+        FROM tenant_settings WHERE tenant_id = $1
+    """,
+    "account_users": """
+        SELECT id, tenant_id, email, display_name, role, is_active,
+               email_verified_at, created_at, updated_at
+        FROM account_users WHERE tenant_id = $1 ORDER BY id
+    """,
+    "account_sessions": """
+        SELECT id, tenant_id, user_id, expires_at, revoked_at, created_at
+        FROM account_sessions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "account_tokens": """
+        SELECT id, tenant_id, user_id, purpose, expires_at, used_at, created_at
+        FROM account_tokens WHERE tenant_id = $1 ORDER BY id
+    """,
+    "audit_log": """
+        SELECT id, tenant_id, actor_user_id, action, entity_type, entity_id,
+               metadata, created_at
+        FROM audit_log WHERE tenant_id = $1 ORDER BY id
+    """,
+    "tenant_webhooks": """
+        SELECT id, tenant_id, target_url, events, is_enabled, created_at, updated_at
+        FROM tenant_webhooks WHERE tenant_id = $1 ORDER BY id
+    """,
+    "webhook_deliveries": """
+        SELECT id, tenant_id, webhook_id, event_name, payload, status, attempts,
+               next_attempt_at, lease_expires_at, last_status_code, last_error,
+               created_at, delivered_at
+        FROM webhook_deliveries WHERE tenant_id = $1 ORDER BY id
+    """,
+    "email_outbox": """
+        SELECT id, tenant_id, recipient, subject, body, status, attempts,
+               next_attempt_at, lease_expires_at, last_error, created_at, sent_at
+        FROM email_outbox WHERE tenant_id = $1 ORDER BY id
+    """,
+    "usage_events": """
+        SELECT id, tenant_id, event_type, source_id, quantity, metadata, occurred_at
+        FROM usage_events WHERE tenant_id = $1 ORDER BY id
+    """,
+    "billing_subscriptions": """
+        SELECT id, tenant_id, plan_slug, plan_name, provider,
+               provider_subscription_id, status, checkout_url,
+               current_period_start, current_period_end, created_at, updated_at
+        FROM billing_subscriptions WHERE tenant_id = $1 ORDER BY id
+    """,
+    "billing_webhook_events": """
+        SELECT id, tenant_id, provider_event_id, event_name,
+               provider_subscription_id, received_at, processed_at
+        FROM billing_webhook_events WHERE tenant_id = $1 ORDER BY id
+    """,
+}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/privacy/export",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited(DASHBOARD_LIMIT, budget="privacy-export"))],
+)
+async def export_tenant_data(tenant_id: str):
+    async def stream_export():
+        exported_at = datetime.now(timezone.utc).isoformat()
+        yield (
+            '{"tenant_id":'
+            + json.dumps(tenant_id)
+            + ',"exported_at":'
+            + json.dumps(exported_at)
+            + ',"data":{'
+        )
+        async with tenant_connection(tenant_id) as conn:
+            for index, (name, query) in enumerate(TENANT_EXPORT_QUERIES.items()):
+                if index:
+                    yield ","
+                yield json.dumps(name) + ":["
+                first = True
+                async for row in conn.cursor(query, tenant_id, prefetch=500):
+                    if not first:
+                        yield ","
+                    first = False
+                    yield json.dumps(
+                        _export_row(row),
+                        default=_export_json_default,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                yield "]"
+        yield "}}"
+
+    return StreamingResponse(
+        stream_export(),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="tenant-{tenant_id}-export.json"'},
+    )
+
+
+TENANT_DATA_DELETE_TABLES = (
+    "email_outbox",
+    "webhook_deliveries",
+    "tenant_webhooks",
+    "account_tokens",
+    "account_sessions",
+    "account_users",
+    "audit_log",
+    "follow_ups",
+    "appointments",
+    "call_analytics",
+    "tool_invocations",
+    "conversation_turns",
+    "consent_records",
+    "interactions",
+    "leads",
+    "contacts",
+    "tenant_data_retention",
+    "knowledge_base_chunks",
+    "properties",
+    "projects",
+    "usage_events",
+    "billing_webhook_events",
+    "billing_subscriptions",
+    "tenant_settings",
+)
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/privacy/data",
+    dependencies=[Depends(require_owner_or_machine), Depends(rate_limited(DASHBOARD_LIMIT, budget="privacy-delete"))],
+)
+async def delete_tenant_data(
+    tenant_id: str,
+    confirmation: TenantDataDeletionConfirmation,
+):
+    if confirmation.confirm_tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="confirm_tenant_id must exactly match the tenant in the URL",
+        )
+
+    async with tenant_connection(tenant_id) as conn:
+        counts: dict[str, int] = {}
+        for table in TENANT_DATA_DELETE_TABLES:
+            counts[table] = await conn.fetchval(
+                f"""
+                WITH deleted AS (
+                    DELETE FROM {table} WHERE tenant_id = $1 RETURNING 1
+                )
+                SELECT count(*) FROM deleted
+                """,
+                tenant_id,
+            )
+
+        # A tenant whose data has been erased must no longer receive calls.
+        registry_rows = await conn.fetch(
+            "SELECT slug, name, plan FROM public.platform_list_tenants() WHERE slug = $1",
+            tenant_id,
+        )
+        for row in registry_rows:
+            await conn.execute(
+                "SELECT public.platform_upsert_tenant($1, $2, 'suspended', $3)",
+                row["slug"],
+                row["name"],
+                row["plan"],
+            )
+        phone_numbers = await conn.fetch(
+            """
+            SELECT phone_number
+            FROM public.platform_list_tenant_phone_numbers()
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        for row in phone_numbers:
+            await conn.execute(
+                "SELECT public.platform_remove_tenant_phone_number($1)",
+                row["phone_number"],
+            )
+        counts["phone_numbers_unassigned"] = len(phone_numbers)
+
+        await write_audit(
+            conn,
+            tenant_id,
+            "tenant.data_deleted",
+            actor_user_id=None,
+            metadata={"deleted_counts": counts},
+        )
+
+    return {"tenant_id": tenant_id, "deleted_counts": counts, "tenant_suspended": True}
+
+
+@app.put(
+    "/admin/tenants/{tenant_id}/privacy/retention",
+    dependencies=[Depends(require_owner_or_machine)],
+)
+async def set_tenant_retention_policy(
+    tenant_id: str,
+    policy: DataRetentionPolicyRequest,
+):
+    async with tenant_connection(tenant_id) as conn:
+        await conn.execute(
+            """
+            INSERT INTO tenant_data_retention (tenant_id, retention_days, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                retention_days = EXCLUDED.retention_days,
+                updated_at = now()
+            """,
+            tenant_id,
+            policy.retention_days,
+        )
+    return {"tenant_id": tenant_id, "retention_days": policy.retention_days}
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/privacy/retention",
+    dependencies=[Depends(require_owner_or_machine)],
+)
+async def get_tenant_retention_policy(tenant_id: str):
+    async with tenant_connection(tenant_id) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT retention_days, updated_at
+            FROM tenant_data_retention
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    if row is None:
+        return {"tenant_id": tenant_id, "retention_days": None}
+    return {"tenant_id": tenant_id, **_row_to_dict(row)}
+
+
 @app.get(
     "/admin/tenants/{tenant_id}/stats",
     dependencies=[Depends(require_tenant_auth), Depends(rate_limited(DASHBOARD_LIMIT, budget="dashboard"))],
@@ -511,6 +1473,37 @@ async def get_dashboard_stats(tenant_id: str):
     }
 
 
+async def _dependency_status() -> dict[str, str]:
+    dependencies = {"postgres": "connected", "redis": "connected"}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError):
+        dependencies["postgres"] = "offline"
+    try:
+        await get_redis_client().ping()
+    except (RedisError, OSError, TimeoutError):
+        dependencies["redis"] = "offline"
+    return dependencies
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    dependencies = await _dependency_status()
+    status = "ok" if all(value == "connected" for value in dependencies.values()) else "degraded"
+    return {"status": status, "service": "admin-api", "dependencies": dependencies}
+
+
+@app.get("/ready")
+async def readiness():
+    dependencies = await _dependency_status()
+    ready = all(value == "connected" for value in dependencies.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "service": "admin-api",
+            "dependencies": dependencies,
+        },
+    )

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import asyncpg
 
+from tools._tenant_settings import get_tenant_operational_settings
+
 # append, not insert(0, ...): both admin-api and tool-router have their
 # own main.py/db.py -- inserting these at the front of sys.path would let
 # admin-api's same-named modules shadow tool-router's own on any
@@ -47,4 +49,9 @@ async def get_calendar_client(connection: asyncpg.Connection, tenant_id: str) ->
         raise CalendarNotConfiguredError(tenant_id)
 
     credentials_dict = json.loads(decrypt(row["encrypted_calendar_credentials"]))
-    return GoogleCalendarClient(credentials_dict)
+    settings = await get_tenant_operational_settings(connection, tenant_id)
+    return GoogleCalendarClient(
+        credentials_dict,
+        time_zone=settings.time_zone,
+        business_hours=settings.business_hours,
+    )

@@ -9,8 +9,7 @@
     "roomConfig": {
       "agents": [
         {
-          "agentName": "propview-agent",
-          "metadata": "{\"tenant_id\": \"default\"}"
+          "agentName": "propview-agent"
         }
       ]
     }

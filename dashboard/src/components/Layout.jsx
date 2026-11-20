@@ -8,6 +8,7 @@ import {
   Phone,
   Settings,
   Users,
+  CreditCard,
   X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -21,18 +22,19 @@ const nav = [
   { to: '/properties', icon: Building2, label: 'Properties' },
   { to: '/appointments', icon: Calendar, label: 'Appointments' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
+  { to: '/usage', icon: CreditCard, label: 'Usage & Billing' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
 export default function Layout({ onLogout }) {
   const [open, setOpen] = useState(false)
   const [branding, setBranding] = useState(null)
-  const [apiHealthy, setApiHealthy] = useState(null)
+  const [health, setHealth] = useState(null)
   const { tenantId } = getAuth()
 
   useEffect(() => {
     api.getBranding().then(setBranding).catch(() => {})
-    api.health().then(() => setApiHealthy(true)).catch(() => setApiHealthy(false))
+    api.health().then(setHealth).catch(() => setHealth({ status: 'offline' }))
   }, [])
 
   const agencyName = branding?.agency_name || tenantId
@@ -120,20 +122,20 @@ export default function Layout({ onLogout }) {
           </button>
           <div className="flex-1" />
           <div className="flex items-center gap-3">
-            {apiHealthy !== null && (
+            {health !== null && (
               <div
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[12px] font-semibold ${
-                  apiHealthy
+                  health.status === 'ok'
                     ? 'bg-accent-light text-accent'
                     : 'bg-red-50 text-hot'
                 }`}
               >
                 <span
                   className={`w-1.5 h-1.5 rounded-full ${
-                    apiHealthy ? 'bg-accent animate-pulse' : 'bg-hot'
+                    health.status === 'ok' ? 'bg-accent animate-pulse' : 'bg-hot'
                   }`}
                 />
-                {apiHealthy ? 'API Connected' : 'API Offline'}
+                {health.status === 'ok' ? 'Services healthy' : 'Service issue'}
               </div>
             )}
           </div>

@@ -1,82 +1,70 @@
-# PROP-605: Load Testing
+# Full-call pipeline load test
 
-`locustfile.py` — Locust-driven concurrent LiveKit WebRTC session load
-test, simulating the plan's "50 concurrent WebRTC calls" scenario.
+`locustfile.py` exercises the call path without a paid Gemini account. Each
+simulated caller joins a LiveKit room, dispatches `propview-agent`, publishes
+audio, and waits for agent audio. In local load mode the orchestrator uses a
+deterministic fake Gemini session that issues a `search_properties` tool call;
+the real Tool Router, Postgres, Redis, LiveKit, orchestrator, and audio
+publishing path still run.
 
-## Why this isn't a standard Locust HTTPUser
+The measured response time is from starting a simulated call until the first
+agent audio frame arrives. Locust runs each asyncio/LiveKit call in a spawned
+subprocess because its gevent-based concurrency cannot safely share LiveKit's
+native FFI event loop.
 
-LiveKit's Python SDK (`livekit-api`/`rtc`) is asyncio-only; Locust's own
-concurrency is gevent-based greenlets. Each simulated call runs in its
-own **subprocess** (`multiprocessing.get_context("spawn")`, explicitly —
-not the default, see why below), and the greenlet blocks on
-`process.join()` — gevent's monkey-patching of `threading`/`os.waitpid`
-(applied automatically by Locust) makes that block only the calling
-greenlet, not the whole process, so many simulated calls still run
-concurrently.
+## Start the full stack
 
-This took three real, failed attempts to get right, each hitting a
-genuine error rather than a hypothetical one — see `locustfile.py`'s
-module docstring for the full blow-by-blow:
-1. One shared event loop across all calls: severe contention, a 20s run
-   recorded zero completed calls.
-2. One thread per call, each with its own event loop: `RuntimeError`s
-   from asyncio's own "is a loop already running" checks on 75-80% of
-   calls — gevent's monkey-patching turned out to not be OS-thread-scoped.
-3. `multiprocessing.Process` with the plain default start method: still
-   resolved to `fork()`, which LiveKit's own FFI runtime explicitly
-   refuses (`the native runtime cannot be used across fork()`) since
-   `from livekit import rtc` already starts native background state in
-   the parent at import time. Fixed by forcing the `spawn` context.
-
-Each simulated "call" joins a room as two participants (a synthetic
-caller publishing a tone + a stand-in agent), mirroring
-`../../services/orchestrator/tests/test_orchestrator_live.py`'s own
-setup — this load-tests LiveKit's own room/media plumbing under
-concurrency, not the orchestrator+Gemini pipeline sitting on top of it
-(which has its own real per-call API cost/rate limits that don't belong
-in a raw connection-capacity test).
-
-## Running it
+From the repository root, copy `.env.example` to `.env` and set a valid
+Fernet `ENCRYPTION_KEY` if you plan to use encrypted tenant settings. The
+other local defaults are for development only; never use them in a deployed
+environment.
 
 ```bash
-# Needs a real LiveKit server -- livekit-server --dev (see
-# ../../infra/livekit/LOCAL_TESTING.md)
-cd tests/load
-locust -f locustfile.py --headless -u 50 -r 5 --run-time 2m --csv=results
-# or, for the interactive web UI:
-locust -f locustfile.py
+docker compose build
+GEMINI_SESSION_MODE=fake \
+ENVIRONMENT=load \
+ENABLE_PREDICTIVE_BARGE_IN=false \
+docker compose up --scale worker=10
 ```
 
-`-u 50` matches the plan's "simulate 50 concurrent WebRTC calls"; `-r 5`
-ramps up 5 users/second rather than all 50 at once, closer to a real
-traffic pattern than a instantaneous spike.
+The fake session is only permitted when both `GEMINI_SESSION_MODE=fake` and
+`ENVIRONMENT=load` are set. It makes one real Tool Router request per call,
+then returns a small synthetic audio frame. It does not call Gemini, Twilio,
+or Google Calendar. Keep the fake mode out of production deployments.
 
-## Verification
+## Run 50–200 concurrent calls
 
-**Verified working** 2026-09-08 at small scale (3 concurrent users, 20s,
-against a local `livekit-server --dev`) — not the full 50-concurrent
-scenario the plan specifies. Final result after the three fixes above:
-**4 real simulated calls completed, 0 failures** (Locust's own
-`--csv` stats output — median 7.5s response time, dominated by the
-2s synthetic-audio publish loop plus real LiveKit connection overhead
-for two participants per call). Low throughput at this small scale is
-expected and not a finding — 3 concurrent users with a `between(1, 3)`
-wait time were never going to produce many completed calls in 20s; the
-result that matters here is 0 failures, confirming the subprocess
-approach is actually reliable, not just "eventually stopped erroring."
+In another terminal, install the pinned Locust dependencies and run from
+`tests/load`:
 
-**Not run at the plan's actual target scale (50 concurrent, sustained)**
-in this environment — a single local dev machine running
-`livekit-server --dev` isn't a realistic stand-in for whatever the real
-deployment target's CPU/network capacity would be (the plan's own DoD is
-about server resource usage under load, which a laptop's numbers
-wouldn't represent meaningfully anyway). The script itself is real and
-runnable; running it at real scale against a real deployment target is
-the natural next step once PROP-102 is actually deployed.
+```bash
+uv pip sync requirements.lock
+locust -f locustfile.py --headless -u 50 -r 5 --run-time 5m --csv=results-50
+locust -f locustfile.py --headless -u 200 -r 10 --run-time 10m --csv=results-200
+```
 
-## Definition of Done (from Sprint Plan)
+For a local capacity test, start with roughly one worker per five calls
+(`--scale worker=10` for 50 callers, `--scale worker=40` for 200) and adjust
+based on CPU, memory, and observed queueing. Set
+`LOAD_TEST_CALL_TIMEOUT_SECONDS` to change the per-call ceiling (default 60),
+and `LOAD_TEST_TENANT_ID` to exercise a separately provisioned tenant.
+The default test tenant is `default`; property search can validly return an
+empty result set.
 
-- [x] Locust-driven concurrent LiveKit WebRTC session load test script.
-- [x] Verified functional at small scale against a real LiveKit server.
-- [ ] Run at the plan's actual target (50-200 concurrent) against a real
-      deployment target, benchmarking CPU/RAM/TTFA degradation under load.
+Do not treat laptop results as production capacity evidence. For a meaningful
+50–200 call benchmark, run Locust on a separate load generator against the
+deployment target, then record worker CPU/memory, call failures, and response
+latency alongside the CSV output. A paid Gemini key is not needed for this
+fake-session path; a real Gemini run is a separate integration test.
+
+## Scope and known gaps
+
+- The test drives inbound audio through the orchestrator and a real Tool
+  Router request, then confirms an agent audio frame reaches the caller.
+- The Gemini model itself is replaced by a deterministic fake, so this does
+  not measure provider latency, model quality, or paid API quota.
+- The fake call uses local load-test metadata instead of a SIP caller's
+  registered phone number. Real SIP dispatch and tenant-number resolution
+  still require the live telephony integration test.
+- Run the 50–200 caller workload against a dedicated target before claiming
+  production capacity.

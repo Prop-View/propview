@@ -363,13 +363,12 @@ entry. **`infra/livekit/dispatch-rule.json`'s `agentName` field must
 match `worker.py`'s `AGENT_NAME` constant exactly**, or real calls create
 an empty room nobody joins.
 
-**Per-tenant resolution replaces the single `TENANT_ID` env var**: a
-dispatched job carries a freeform metadata string
-(`ctx.job.metadata`, JSON, read as `{"tenant_id": "..."}`), set per
-dispatch rule — so a real multi-tenant deployment needs **one dispatch
-rule per tenant** (`infra/livekit/README.md`), not one shared rule file
-edited per agency. Falls back to the `"default"` tenant if metadata is
-missing/invalid, rather than crashing the job.
+**Per-tenant resolution uses the inbound dialed number**: the worker reads
+the SIP participant's `sip.trunkPhoneNumber` attribute and calls the
+restricted tenant-phone registry function. Missing configuration, an
+unknown number, or an inactive tenant ends the call; there is no
+`"default"` fallback. A shared dispatch rule can serve multiple tenants;
+`TENANT_ID` remains only for manual local runs.
 
 **Live-verified 2026-10-14, no real telephony needed**: a synthetic
 caller joined a room, `lk.agent_dispatch.create_dispatch()` requested
@@ -449,11 +448,11 @@ and one genuine gap with no prior trace anywhere (not even a DoD line):
     idempotently every scan regardless. Verified directly: a test
     forcing a simulated send failure, then re-running the scan,
     confirmed the retry actually happens.
-  - `FOLLOWUP_TENANT_IDS` (comma-separated env var, default `"default"`)
-    is a deliberate simplification, not a real tenant registry — there's
-    no RLS-safe way to enumerate tenant_ids without a raw connection
-    bypassing tenant isolation (section 2), and nothing else in this repo
-    has solved that either.
+  - Superseded in Phase 2: the script enumerates active tenants through
+    the restricted platform registry function and reads each tenant's
+    settings through `tenant_connection()`. It records successful
+    follow-up SMS in the usage ledger. The scheduler itself remains an
+    external, not-yet-deployed dependency.
   - It's a **one-shot script**, not a daemon — no scheduler/cron is
     deployed anywhere in this repo yet; wiring one is a separate, later
     infra decision, same "code complete, infra pending" category as the

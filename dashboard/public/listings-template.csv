@@ -1,0 +1,2 @@
+address,city,state,property_type,price,status,beds,baths,sqft,hoa_fee,listing_agent,amenities,project_id
+123 Oak St,Austin,TX,house,520000,active,3,2,1800,0,Alex Agent,pool|garage,
