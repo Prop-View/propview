@@ -86,6 +86,12 @@ jobs:
           # above carry -- without this the migration step below dies with
           # ModuleNotFoundError before a single test runs.
           python -m pip install --require-hashes -r db/migrations/requirements.lock
+
+      - name: Install the spaCy model presidio needs
+        # Not installable from the hash-pinned locks: spaCy models ship as
+        # GitHub release assets, not PyPI packages. The orchestrator and
+        # compliance suites both call mask_pii(), which loads it lazily.
+        run: python -m spacy download en_core_web_sm
       - name: Apply database migrations
         run: python db/migrations/apply_migrations.py
         env:

@@ -13,5 +13,14 @@ python-dotenv>=1.0.0
 httpx>=0.28.0
 opentelemetry-api>=1.41.1
 opentelemetry-sdk>=1.41.1
+# Cross-service imports: the orchestrator adds ../compliance and
+# ../gemini-client to sys.path and imports them at module level
+# (mask_pii, GeminiLiveSession), so their dependencies have to be installed
+# here too -- the Dockerfile copies all of services/ but installs only this
+# lock. Keep in sync with ../compliance/requirements.txt and
+# ../gemini-client/requirements.txt.
+presidio-analyzer>=2.2.0
+presidio-anonymizer>=2.2.0
+google-genai>=1.75.0
 pytest>=8.0.0
 pytest-asyncio>=1.4.0
