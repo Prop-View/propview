@@ -518,3 +518,143 @@ and one genuine gap with no prior trace anywhere (not even a DoD line):
 - The local Admin API port is 8001 and the Vite dashboard origin is
   `http://localhost:5173`. Keep those aligned in docs and
   `dashboard/.env.example`.
+
+## 15. 7-phase product plan — status audit (2026-11-13)
+
+A second developer is executing a new 7-phase plan (Engine fixes →
+Multi-tenant plumbing → Accounts/product API → Dashboard → Billing →
+Production infra → Market compliance) on `dev`/`main` (currently the same
+commit, `880aa31`). Audited by reading the actual code, not the plan or
+any README, across 5 parallel passes. **Phase 1 is genuinely done; Phases
+2–7 have not started.** Per-service READMEs (`dashboard/README.md`,
+`services/admin-api/README.md`, `services/compliance/COMPLIANCE_AND_ESCALATION.md`,
+root `README.md`) were all found to already accurately describe this —
+none needed correction. This section exists because, before this audit,
+nothing recorded which of the 7 phases were actually reached.
+
+**Phase 1 (engine fixes) — DONE**, fake-session/unit-tested, honestly
+flagged where real-key/live verification is still outstanding:
+- `GEMINI_LIVE_MODEL` default is now `gemini-3.8-live` (`gemini_live_client.py`),
+  configurable, confirmed via test.
+- GoAway handling + session resumption + context window compression
+  implemented (`_connect_session`/`_resume_session`/`receive_events` in
+  `gemini_live_client.py`); 3/3 fake-session tests pass. Not yet run
+  against a real Gemini connection.
+- Fair Housing filter is genuinely wired into `orchestrator.py`
+  (`_record_transcript_chunk` → `check_fair_housing` on a finished caller
+  chunk → suppress Gemini audio → play `fair_housing_redirect.wav` →
+  cancellable on barge-in); 6/6 mocked tests pass. The one already-known
+  gap stands exactly as previously documented: the caller-side
+  `TranscriptChunk.finished` signal is still unverified against real
+  mic/SIP audio.
+- `tests/e2e-voice`'s `0_first_turn_ai_disclosure` scenario exists and its
+  checker is unit-tested (3/3), but has not been re-run live against a
+  real Gemini key since being added.
+- `infra/livekit/setup_sip_routing.sh` now uses the current documented
+  `lk sip inbound create <file>` / `lk sip dispatch create <file>` syntax
+  (no more `--config`), but there is still no `lk` CLI installed anywhere
+  in this environment to actually run it against.
+
+**Phase 2 (multi-tenant plumbing) — NOT STARTED, and one item is
+currently the opposite of the plan.** No `tenants`, `tenant_phone_numbers`,
+or `usage_events` table exists anywhere (`db/migrations` stops at `010`).
+`tenant_settings` only carries `calendar_provider`,
+`encrypted_calendar_credentials`, `admin_api_key_hash`, `agency_name` —
+broker transfer number, SMS/WhatsApp sender, time zone, business hours,
+voice name, and greeting are all still global env vars/constants
+(`call_session.py`, `sms_dispatch.py`, `followup_scan.py`'s hardcoded
+`DEFAULT_BUSINESS_HOURS`). **`worker.py`'s `_resolve_tenant_id` still
+falls back to `DEFAULT_TENANT_ID` ("default") on missing/invalid job
+metadata** — the plan explicitly calls for ending the call instead; this
+is a real, deliberate-sounding-but-actually-stale piece of behavior (it
+made sense before a tenant registry existed to resolve against) that
+should be revisited once Phase 2 actually starts, not left as a silent
+multi-tenant misrouting risk. `services/orchestrator/db.py` and
+`tenant_branding.py` still open and close a fresh `asyncpg.connect()`
+per call — `services/tool-router/db.py` already has the
+`create_pool()`/`get_pool()` pattern this should be ported from.
+
+**Phase 3 (admin-api accounts/product API) — NOT STARTED**, except a
+thin partial: encrypted calendar-credential storage
+(`PUT/GET /admin/tenants/{id}/calendar-credentials`) exists and is reused
+by `scheduling/calendar_client.py`, but there is no actual OAuth
+authorize/callback flow — a caller must already have a refresh token to
+PUT. Everything else (user accounts/argon2/sessions/audit_log, self-serve
+signup, write endpoints for leads/appointments/listings, CSV upload,
+knowledge-base upload, settings endpoints, webhooks, email notifications,
+published OpenAPI) has zero supporting code. Auth remains exactly the
+per-tenant SHA-256-hashed API key design from migration `006`
+(`services/admin-api/auth.py`) — no user/role concept exists at all.
+
+**Phase 4 (dashboard) — PARTIAL.** The read-side is real and live: Dashboard,
+Calls, CallDetail, Leads, Properties, Appointments, and Analytics pages
+all call real Admin API endpoints. But: login is still the raw tenant API
+key, typed into a form and stored in plaintext `localStorage`
+(`dashboard/src/api.js`/`Login.jsx`) — no email/password, no signup, no
+reset. Settings page is mostly disconnected placeholders (only the
+agency-name field is wired; voice config has no `onChange`; the API key
+shown is a fake masked display string; Tool Router/LiveKit/Redis status
+are hardcoded "check env" text, not actually probed) and has no
+business-hours/time-zone/calendar-connect/webhooks/team-member sections
+at all. No CSV or knowledge-base upload UI, no lead/appointment editing,
+no usage/billing page. No test runner is even installed
+(`package.json` has no `vitest`/`jest`/`@playwright/test`, no `test`
+script). `dashboard/README.md`'s own "Current gaps" section already
+states all of this plainly.
+
+**Phase 5 (billing) — NOT STARTED.** No plans/subscriptions tables, no
+payment-provider interface, no `usage_events` table, no payment webhook,
+no plan-limit warnings. Root `README.md` already says so.
+
+**Phase 6 (production infrastructure) — mostly NOT STARTED**, a few
+partials:
+- No Dockerfiles anywhere (checked every `services/*` subdir), no CI
+  (no `.github` directory at all), no Terraform (`infra/gcp` is still
+  the single-VM shell-script provisioner from the original plan, not
+  IaC/autoscaling).
+- Secret rotation and a secrets manager remain **design-only** —
+  `infra/observability/SECURITY_AUDIT.md` §7 lays out what a rotation
+  helper would need; none of it is built. Every credential is still a
+  bare `os.environ.get(...)`.
+- `/health` on admin-api and tool-router is a static liveness ping with
+  no Postgres/Redis check — not a readiness probe. No graceful-shutdown/
+  drain logic for active calls exists anywhere.
+- Prometheus+Grafana are real and live-verified for a single static
+  scrape target, but **no alert rules exist**, and — worth fixing before
+  this goes anywhere real — **Grafana's anonymous access is currently ON**
+  (`infra/observability/docker-compose.yml`: `GF_AUTH_ANONYMOUS_ENABLED=true`),
+  the exact opposite of what Phase 6 asks for.
+- No per-tenant retention job, data export/deletion endpoints, or
+  consent-record table exist.
+- `tests/load/locustfile.py` (PROP-605) exists but is a different test
+  than Phase 6 asks for: it load-tests LiveKit's own room/media capacity
+  at "tens, not 50–200" concurrent connections, explicitly without a
+  Gemini session in the loop at all (real or fake) — not the full-pipeline
+  load test Phase 6 specifies. Don't conflate the two when reading
+  `README.md`'s existing Locust mention.
+
+**Phase 7 (US market compliance) — mostly moot, in a good way.**
+`COMPLIANCE_AND_ESCALATION.md`'s regional table marks "Not built" only
+for **India and UAE** — no US row is tagged "not built." The one
+US-relevant gap is TCPA prior-express-consent for *outbound* calling,
+marked "Not applicable yet" since this system is inbound-only. Fair
+Housing/anti-steering is "Partially implemented" (built in Phase 1, pending
+the same real-audio verification noted above). **There is effectively no
+separate Phase 7 scope left to build for a US-only launch** — it was
+already covered by Phase 1 plus the system's inbound-only shape.
+
+**What this means for "how far from a real, testable call"**: the gating
+item is **not** on this 7-phase plan at all — it's the Twilio SIP
+trunk/DID + GCP VM + LiveKit SIP gateway provisioning thread from the
+*original* 6-sprint plan (`infra/telephony/provisioning`, `infra/gcp`,
+`infra/livekit`), paused mid-flight waiting on Twilio account funding
+(see `infra/telephony/provisioning/README.md`'s 2026-10-14 entry). None
+of Phases 2–7 above block placing one real test call to one pilot tenant
+— Phase 2's tenant-registry absence is actually irrelevant with exactly
+one tenant in play, and Phases 3–6 are about scaling/selling after that
+first call works, not about making it possible. The real remaining
+sequence for a first real call is: fund Twilio → run
+`provision_sip_trunk.py` → deploy the GCP VM + LiveKit SIP gateway →
+wire the origination URI → re-verify Phase 1's real-key/real-audio gaps
+(new model, GoAway under real network conditions, Fair Housing against
+real caller audio, AI disclosure scenario) against that real call.
