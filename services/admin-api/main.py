@@ -41,7 +41,6 @@ from auth import (  # noqa: E402
     generate_api_key,
     hash_key,
     require_machine_api_key,
-    require_owner,
     require_owner_or_machine,
     require_platform_token,
     require_tenant_auth,
@@ -772,6 +771,26 @@ async def set_tenant_operational_settings(
             raise HTTPException(status_code=422, detail="time_zone must be a valid IANA time zone") from exc
 
     async with tenant_connection(tenant_id) as conn:
+        # A transfer target that is itself an inbound DID sends the caller
+        # back into the agent instead of to a human: human_transfer.py passes
+        # this straight to transfer_to=. That is easy to do by accident once
+        # an agent forwards their own number to us, since the number they
+        # think of as "their line" is then one of ours. Checked against every
+        # active tenant's DIDs, not just this tenant's -- any of them loops.
+        broker_transfer_number = updates.get("broker_transfer_number")
+        if broker_transfer_number is not None:
+            loops_into_tenant = await conn.fetchval(
+                "SELECT public.platform_resolve_tenant_by_phone($1)", broker_transfer_number
+            )
+            if loops_into_tenant is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "broker_transfer_number is an inbound agent number, so transfers to it "
+                        "would loop back into the AI. Use a different line for human handoff."
+                    ),
+                )
+
         current_hours = await conn.fetchrow(
             """
             SELECT business_hours_start_hour, business_hours_end_hour

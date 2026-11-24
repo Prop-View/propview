@@ -17,7 +17,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tool-router"))
+# Deliberately does NOT add tool-router: followup_scan imports nothing from it,
+# and putting it ahead of orchestrator makes `db` resolve to tool-router's
+# module, whose get_pool()/tenant_connection() take one fewer argument. See
+# test_db_module_resolves_to_orchestrator below.
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "scheduling"))
 
 os.environ.setdefault("DATABASE_URL", "postgresql://propview_app:devpassword@localhost:5433/propview_dev")
@@ -36,6 +39,36 @@ from sms_dispatch import SmsDispatchError
 
 TEST_TENANT = "test-followup-manager"
 AGENCY = "Test Agency"
+
+
+def test_db_module_resolves_to_orchestrator():
+    """run_scan() reaches the database through tenant_registry and
+    tenant_settings, which both do a bare `from db import ...`. sys.path is
+    process-global, so whichever `db` module is first on it wins for them too.
+
+    tool-router's db.get_pool() takes no arguments and its
+    tenant_connection() takes one; orchestrator's take one and two. Resolving
+    `db` to tool-router therefore makes every call in run_scan() raise
+    TypeError -- which the rest of this file missed for a release, because it
+    only exercises _scan_no_shows/_scan_nurture and never run_scan() itself.
+    """
+    import inspect
+
+    import db
+    import tenant_registry
+    import tenant_settings
+
+    assert Path(db.__file__).parent.name == "orchestrator", (
+        f"`db` resolved to {db.__file__}; run_scan() needs orchestrator's db module"
+    )
+
+    # Bind the call shapes these modules actually use, so a future signature
+    # change is caught here rather than at 3am in a scheduled job.
+    inspect.signature(db.get_pool).bind("postgresql://example/db")
+    inspect.signature(db.tenant_connection).bind("tenant-id", "postgresql://example/db")
+    inspect.signature(db.close_pool).bind()
+    assert tenant_registry.list_active_tenant_ids is not None
+    assert tenant_settings.get_tenant_call_settings is not None
 
 
 async def _cleanup() -> None:

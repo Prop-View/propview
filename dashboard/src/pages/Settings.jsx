@@ -210,13 +210,17 @@ function KnowledgeUpload() {
   async function upload(event) {
     event.preventDefault()
     if (!file) return
+    // Captured before the await: React clears `currentTarget` once the handler
+    // yields, so reading it afterwards throws and the catch below reports a
+    // successful upload as "Upload failed".
+    const form = event.currentTarget
     setBusy(true)
     setMessage('')
     try {
       const result = await api.uploadKnowledgeDocument(file, sourceType)
       setMessage(`Uploaded ${result.filename}; ${result.chunks_created} knowledge chunks created.`)
       setFile(null)
-      event.currentTarget.reset()
+      form.reset()
     } catch (requestError) {
       setMessage(`Upload failed: ${requestError.message}`)
     } finally {

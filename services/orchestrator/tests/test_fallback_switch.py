@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gemini-client"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "fallback-pipeline"))
 
-from gemini_live_client import AudioChunk, TurnComplete
 from health_monitor import HealthMonitor
 from orchestrator import CallOrchestrator
 

@@ -79,7 +79,17 @@ class GoogleCalendarClient:
         body = {"timeMin": time_min.isoformat(), "timeMax": time_max.isoformat(), "items": [{"id": self._calendar_id}]}
         result = self._service.freebusy().query(body=body).execute()
         busy = result["calendars"][self._calendar_id]["busy"]
-        return [TimeSlot(datetime.fromisoformat(b["start"]), datetime.fromisoformat(b["end"])) for b in busy]
+        # Normalized on the way in, exactly like time_min/time_max in
+        # find_open_slots: an ISO string without an offset parses to a naive
+        # datetime, and comparing it against the aware cursor raises
+        # "can't compare offset-naive and offset-aware datetimes".
+        return [
+            TimeSlot(
+                self.normalize_datetime(datetime.fromisoformat(b["start"])),
+                self.normalize_datetime(datetime.fromisoformat(b["end"])),
+            )
+            for b in busy
+        ]
 
     async def find_open_slots(
         self,

@@ -48,7 +48,7 @@ def test_ulaw_roundtrip_is_within_quantization_error():
     original = [0, 100, -100, 1000, -1000, 8000, -8000, 20000, -20000, 32000, -32000]
     encoded = ar.pcm16_to_ulaw(pcm16_bytes(original))
     decoded = unpack_pcm16(ar.ulaw_to_pcm16(encoded))
-    for orig, rt in zip(original, decoded):
+    for orig, rt in zip(original, decoded, strict=True):
         # mu-law is lossy/logarithmic; error grows with magnitude but should
         # stay well under 5% of full scale for any single sample here.
         assert abs(orig - rt) < 1600, f"{orig} -> {rt}"
@@ -91,7 +91,7 @@ def test_upsample_then_downsample_roundtrips_closely():
     original = [int(3000 * math.sin(2 * math.pi * 200 * i / RATE_8K)) for i in range(FRAME_SAMPLES_8K)]
     up = ar.upsample_8k_to_16k(pcm16_bytes(original))
     back = unpack_pcm16(ar.downsample_16k_to_8k(up))
-    for a, b in zip(original, back):
+    for a, b in zip(original, back, strict=True):
         assert abs(a - b) < 200, f"{a} -> {b}"
 
 
