@@ -733,3 +733,49 @@ def test_razorpay_adapter_uses_test_subscription_api(monkeypatch):
         asyncio.run(provider.create_subscription("plan_test_123", "sample-agency", "starter"))
     with pytest.raises(ValueError, match="live credentials"):
         billing.RazorpayTestProvider("rzp_live_example", "live-secret")
+
+
+def test_broker_transfer_number_cannot_be_an_inbound_agent_number(api, monkeypatch):
+    """A transfer target that is itself an inbound DID bounces the caller back
+    into the agent, because human_transfer.py hands the value straight to
+    transfer_to=. This is easy to hit once an agent forwards their own number
+    to us: the line they think of as theirs is then one of ours.
+    """
+    client, tenants = api
+    tenant_id, owner_token, _ = _signup_and_login(client, tenants, monkeypatch)
+    client.headers["Authorization"] = f"Bearer {owner_token}"
+
+    platform_headers = {"Authorization": f"Bearer {os.environ['PLATFORM_OPERATOR_TOKEN']}"}
+    inbound_number = f"+1512{uuid.uuid4().int % 10_000_000:07d}"
+    mapped = client.put(
+        "/admin/platform/phone-numbers",
+        json={"tenant_id": tenant_id, "phone_number": inbound_number},
+        headers=platform_headers,
+    )
+    assert mapped.status_code == 200, mapped.text
+
+    try:
+        looped = client.put(
+            f"/admin/tenants/{tenant_id}/settings",
+            json={"broker_transfer_number": inbound_number},
+        )
+        assert looped.status_code == 422, looped.text
+        assert "loop" in looped.json()["detail"].lower()
+
+        # A different line is still accepted, and the rejection above must not
+        # have written a partial row.
+        separate_line = f"+1737{uuid.uuid4().int % 10_000_000:07d}"
+        accepted = client.put(
+            f"/admin/tenants/{tenant_id}/settings",
+            json={"broker_transfer_number": separate_line},
+        )
+        assert accepted.status_code == 200, accepted.text
+        settings = client.get(f"/admin/tenants/{tenant_id}/settings").json()
+        assert settings["broker_transfer_number"] == separate_line
+    finally:
+        client.request(
+            "DELETE",
+            "/admin/platform/phone-numbers",
+            json={"phone_number": inbound_number},
+            headers=platform_headers,
+        )
