@@ -2,6 +2,8 @@
   "trunk": {
     "name": "twilio-propview-trunk",
     "numbers": ["REPLACE_WITH_TWILIO_DID"],
-    "allowed_addresses": []
+    "allowed_addresses": [],
+    "auth_username": "REPLACE_WITH_SIP_USERNAME_YOU_INVENT",
+    "auth_password": "REPLACE_WITH_SIP_PASSWORD_YOU_INVENT"
   }
 }

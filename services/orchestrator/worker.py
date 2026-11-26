@@ -94,10 +94,23 @@ def _get_dialed_number(room: rtc.Room) -> str:
         if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
     ]
     if len(sip_participants) != 1:
+        logger.error(
+            "Tenant resolution: expected 1 SIP participant, found %d. Room participants: %s",
+            len(sip_participants),
+            [(p.identity, str(p.kind)) for p in room.remote_participants.values()],
+        )
         raise TenantResolutionError("Expected exactly one SIP caller in the dispatched room")
 
     dialed_number = sip_participants[0].attributes.get(SIP_DIALED_NUMBER_ATTRIBUTE)
     if not dialed_number:
+        # Carriers and LiveKit-native numbers have differed on this attribute's
+        # name; dump the whole set so the right key is visible immediately
+        # rather than costing another inbound call to discover.
+        logger.error(
+            "Tenant resolution: %r absent from SIP participant. All attributes: %s",
+            SIP_DIALED_NUMBER_ATTRIBUTE,
+            dict(sip_participants[0].attributes),
+        )
         raise TenantResolutionError("LiveKit SIP participant has no dialed-number attribute")
     return dialed_number
 

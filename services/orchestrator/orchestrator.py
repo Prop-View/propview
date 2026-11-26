@@ -43,7 +43,6 @@ from telemetry import CallTelemetry, log_event
 from tool_client import ToolRouterClient
 from transcript_store import save_interaction
 from vocal_filler import VocalFillerPlayer
-from usage_metering import record_usage_event
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vap-sidecar"))
 from vap_processor import SpeechActivityDetector  # noqa: E402
@@ -53,6 +52,7 @@ from fair_housing_filter import check_fair_housing  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "scheduling"))  # append, not insert(0) -- see tool-router/tools/_calendar_context.py
 from sms_dispatch import SmsDispatchError, send_sms  # noqa: E402
+from usage_metering import record_usage_event  # noqa: E402 -- also lives in services/scheduling
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "fallback-pipeline"))
 from health_monitor import HealthMonitor  # noqa: E402
